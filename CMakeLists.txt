@@ -56,6 +56,38 @@ install(TARGETS ${PROJECT_NAME}
   DESTINATION lib/${PROJECT_NAME}
 )
 
+add_executable(insta360_ros_driver_decoded src/main_decoded.cpp)
+ament_target_dependencies(insta360_ros_driver_decoded
+  rclcpp
+  camera_info_manager
+  cv_bridge
+  image_transport
+  std_msgs
+  std_srvs
+  OpenCV
+)
+target_link_libraries(insta360_ros_driver_decoded CameraSDK  ${OpenCV_LIBRARIES} ${AVCODEC_LIBRARIES} ${AVFORMAT_LIBRARIES} ${AVUTIL_LIBRARIES} ${SWSCALE_LIBRARIES})
+
+install(TARGETS insta360_ros_driver_decoded
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+add_executable(insta360_ros_driver_decoded_equirectangular src/main_decoded_equirectangular.cpp)
+ament_target_dependencies(insta360_ros_driver_decoded_equirectangular
+  rclcpp
+  camera_info_manager
+  cv_bridge
+  image_transport
+  std_msgs
+  std_srvs
+  OpenCV
+)
+target_link_libraries(insta360_ros_driver_decoded_equirectangular CameraSDK  ${OpenCV_LIBRARIES} ${AVCODEC_LIBRARIES} ${AVFORMAT_LIBRARIES} ${AVUTIL_LIBRARIES} ${SWSCALE_LIBRARIES})
+
+install(TARGETS insta360_ros_driver_decoded_equirectangular
+  DESTINATION lib/${PROJECT_NAME}
+)
+
 add_executable(decoder src/decoder.cpp)
 ament_target_dependencies(decoder
   rclcpp

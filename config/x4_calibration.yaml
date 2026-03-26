@@ -12,5 +12,5 @@ equirectangular_node:
     gpu: True
     out_width: 1920
     out_height: 960
-
+    target_fps: 15.0
 

@@ -50,6 +50,7 @@ class EquirectangularBaseNode(Node):
                 ("gpu", True),
                 ("out_width", 1920),
                 ("out_height", 960),
+                ("target_fps", 0.0),
             ],
         )
 
@@ -67,14 +68,25 @@ class EquirectangularBaseNode(Node):
         self.add_on_set_parameters_callback(self.parameters_callback)
 
         qos = rclpy.qos.QoSProfile(
-            depth=1,
-            reliability=rclpy.qos.ReliabilityPolicy.RELIABLE,
+            depth=10,
+            reliability=rclpy.qos.ReliabilityPolicy.BEST_EFFORT,
         )
 
         self.dual_fisheye_sub = self.create_subscription(
             Image, "/dual_fisheye/image", self.image_callback, qos
         )
         self.equirect_pub = self.create_publisher(Image, "/equirectangular/image", qos)
+
+        self.latest_dual_fisheye_msg: Image | None = None
+        self.latest_msg_ready = False
+        self.rate_timer = None
+
+        if self.target_fps > 0.0:
+            period = 1.0 / self.target_fps
+            self.rate_timer = self.create_timer(period, self.rate_timer_callback)
+            self.get_logger().info(
+                f"Fixed-rate mode enabled for equirectangular output: target_fps={self.target_fps:.2f}"
+            )
 
     def load_parameters(self):
         self.cx_offset = self.get_parameter("cx_offset").value
@@ -87,6 +99,7 @@ class EquirectangularBaseNode(Node):
         self.out_width = self.get_parameter("out_width").value
         self.out_height = self.get_parameter("out_height").value
         self.gpu_enabled = self.get_parameter("gpu").value
+        self.target_fps = float(self.get_parameter("target_fps").value)
 
         translation = self.get_parameter("translation").value
         self.tx, self.ty, self.tz = translation
@@ -121,15 +134,39 @@ class EquirectangularBaseNode(Node):
             "out_width",
             "out_height",
             "gpu",
+            "target_fps",
         }
         if any(param.name in tracked for param in params):
+            old_target_fps = self.target_fps
             self.load_parameters()
             self.use_cuda = torch.cuda.is_available() and self.gpu_enabled
             self.device = torch.device("cuda" if self.use_cuda else "cpu")
             self.update_camera_parameters()
             self.maps_initialized = False
 
+            if self.target_fps != old_target_fps:
+                if self.rate_timer is not None:
+                    self.rate_timer.cancel()
+                    self.rate_timer = None
+
+                if self.target_fps > 0.0:
+                    period = 1.0 / self.target_fps
+                    self.rate_timer = self.create_timer(period, self.rate_timer_callback)
+                    self.get_logger().info(
+                        f"Updated fixed-rate mode: target_fps={self.target_fps:.2f}"
+                    )
+                else:
+                    self.get_logger().info("Fixed-rate mode disabled; using input-driven processing")
+
         return SetParametersResult(successful=True)
+
+    def rate_timer_callback(self):
+        if not self.latest_msg_ready or self.latest_dual_fisheye_msg is None:
+            return
+
+        dual_fisheye_msg = self.latest_dual_fisheye_msg
+        self.latest_msg_ready = False
+        self.process_frame(dual_fisheye_msg)
 
     def update_camera_parameters(self):
         rx = torch.tensor(
@@ -264,15 +301,15 @@ class EquirectangularBaseNode(Node):
             front_img,
             self.front_map_x_np,
             self.front_map_y_np,
-            cv2.INTER_CUBIC,
-            borderMode=cv2.BORDER_CONSTANT,
+            cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_REPLICATE,
         )
         back_result = cv2.remap(
             back_img,
             self.back_map_x_np,
             self.back_map_y_np,
-            cv2.INTER_CUBIC,
-            borderMode=cv2.BORDER_CONSTANT,
+            cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_REPLICATE,
         )
 
         equirect = np.zeros((self.out_height, self.out_width, 3), dtype=np.uint8)
@@ -312,14 +349,14 @@ class EquirectangularBaseNode(Node):
             front_tensor,
             self.front_grid,
             mode="bilinear",
-            padding_mode="zeros",
+            padding_mode="border",
             align_corners=True,
         )
         back_remapped = F.grid_sample(
             back_tensor,
             self.back_grid,
             mode="bilinear",
-            padding_mode="zeros",
+            padding_mode="border",
             align_corners=True,
         )
 
@@ -343,6 +380,15 @@ class EquirectangularBaseNode(Node):
         return np.clip(output_np, 0, 255).astype(np.uint8)
 
     def image_callback(self, dual_fisheye_msg: Image):
+        if self.target_fps > 0.0:
+            # Keep only the newest frame. Timer callback processes at fixed output rate.
+            self.latest_dual_fisheye_msg = dual_fisheye_msg
+            self.latest_msg_ready = True
+            return
+
+        self.process_frame(dual_fisheye_msg)
+
+    def process_frame(self, dual_fisheye_msg: Image):
         try:
             dual_fisheye_img = self.bridge.imgmsg_to_cv2(dual_fisheye_msg, "rgb8")
             _, img_width_full, _ = dual_fisheye_img.shape

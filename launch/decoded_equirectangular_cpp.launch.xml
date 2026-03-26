@@ -1,0 +1,12 @@
+<?xml version="1.0"?>
+<launch>
+    <arg name="equirectangular_config" default="$(find-pkg-share insta360_ros_driver)/config/x4_calibration.yaml"/>
+    <arg name="skip_frame" default="0"/>
+    <arg name="i_frame_only" default="false"/>
+
+    <node pkg="insta360_ros_driver" exec="insta360_ros_driver_decoded_equirectangular" name="equirectangular_node" output="screen">
+        <param name="skip_frame" value="$(var skip_frame)"/>
+        <param name="i_frame_only" value="$(var i_frame_only)"/>
+        <param from="$(var equirectangular_config)"/>
+    </node>
+</launch>

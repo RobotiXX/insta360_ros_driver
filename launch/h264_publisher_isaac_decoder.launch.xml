@@ -1,0 +1,73 @@
+<?xml version="1.0"?>
+<launch>
+  <!-- 
+    Jetson Orin AGX deployment with ISAAC ROS H.264 decoder integration.
+    
+    Architecture:
+    1. h264_publisher: Captures raw H.264 from camera SDK
+    2. isaac_ros_h264_decoder: Decodes H.264 to RGB8 (requires isaac_ros_compression package)
+    3. equirectangular_node: Projects dual-fisheye to equirectangular format
+  -->
+
+  <!-- H.264 Publisher Node -->
+  <node 
+    name="h264_publisher" 
+    pkg="insta360_ros_driver" 
+    exec="insta360_ros_driver_h264_publisher"
+    output="screen">
+    <param name="skip_frame" value="0" />
+    <param name="i_frame_only" value="false" />
+  </node>
+
+  <!--
+    ISAAC ROS H.264 Decoder Node (requires isaac_ros_compression package)
+    
+    To enable ISAAC ROS decoder support:
+    1. Install isaac_ros_compression on Jetson Orin:
+       cd ~/ros2_ws/src
+       git clone https://github.com/NVIDIA-ISAAC-ROS/isaac_ros_compression.git
+       cd ~/ros2_ws && rosdep install -i --from-path src --rosdistro humble -y
+       colcon build --symlink-install
+    
+    2. Uncomment the decoder component below
+    3. Launch this file with isaac_ros support enabled
+    
+    Performance Notes:
+    - ISAAC ROS decoder uses GXF framework optimized for Jetson
+    - Supports hardware NVDEC on Jetson Orin (more efficient than h264_cuvid)
+    - Outputs to /image_uncompressed (configurable)
+  -->
+  
+  <!--
+  <node
+    name="isaac_ros_h264_decoder"
+    pkg="isaac_ros_h264_decoder"
+    exec="isaac_ros_h264_decoder_node"
+    output="screen"
+    namespace="/">
+    <remap from="/image_compressed" to="/camera/h264" />
+  </node>
+  -->
+
+  <!--
+    Equirectangular Projection Node (subscribes to decoded image)
+    
+    For ISAAC ROS decoder path, this node would subscribe to:
+    - /image_uncompressed (from ISAAC ROS decoder)
+    
+    Alternatively, keep using the combined node:
+    - insta360_ros_driver_decoded_equirectangular (FFmpeg decoder + equirectangular)
+    
+    For now, launch the combined node with FFmpeg backend.
+  -->
+  <node
+    name="equirectangular_node"
+    pkg="insta360_ros_driver"
+    exec="insta360_ros_driver_decoded_equirectangular"
+    output="screen">
+    <param name="skip_frame" value="0" />
+    <param name="i_frame_only" value="false" />
+    <param-file command="find insta360_ros_driver" args="config/x4_calibration.yaml" />
+  </node>
+
+</launch>

@@ -26,6 +26,10 @@ class EquirectangularNode(Node):
             parameters=[
                 ('cx_offset', 0.0),
                 ('cy_offset', 0.0),
+                ('front_cx_offset', 0.0),
+                ('front_cy_offset', 0.0),
+                ('back_cx_offset', 0.0),
+                ('back_cy_offset', 0.0),
                 ('crop_size', 960),
                 ('translation', [0.0, 0.0, -0.105]),
                 ('rotation_deg', [-0.5, 0.0, 1.1]),
@@ -100,6 +104,10 @@ class EquirectangularNode(Node):
         try:
             self.cx_offset = self.get_parameter('cx_offset').get_parameter_value().double_value
             self.cy_offset = self.get_parameter('cy_offset').get_parameter_value().double_value
+            self.front_cx_offset = self.get_parameter('front_cx_offset').get_parameter_value().double_value
+            self.front_cy_offset = self.get_parameter('front_cy_offset').get_parameter_value().double_value
+            self.back_cx_offset = self.get_parameter('back_cx_offset').get_parameter_value().double_value
+            self.back_cy_offset = self.get_parameter('back_cy_offset').get_parameter_value().double_value
             self.crop_size = self.get_parameter('crop_size').get_parameter_value().integer_value
             self.out_width = self.get_parameter('out_width').get_parameter_value().integer_value
             self.out_height = self.get_parameter('out_height').get_parameter_value().integer_value
@@ -115,7 +123,13 @@ class EquirectangularNode(Node):
             
             self.get_logger().info(f"Loaded parameters from ROS parameter server")
             self.get_logger().info(f"  Crop size: {self.crop_size}")
-            self.get_logger().info(f"  Center offset: ({self.cx_offset}, {self.cy_offset})")
+            self.get_logger().info(f"  Shared center offset: ({self.cx_offset}, {self.cy_offset})")
+            self.get_logger().info(
+                f"  Front center offset: ({self.front_cx_offset}, {self.front_cy_offset})"
+            )
+            self.get_logger().info(
+                f"  Back center offset: ({self.back_cx_offset}, {self.back_cy_offset})"
+            )
             self.get_logger().info(f"  Translation: [{self.tx}, {self.ty}, {self.tz}]")
             self.get_logger().info(f"  Rotation (deg): {rotation_deg}")
             self.get_logger().info(f"  Output size: {self.out_width}x{self.out_height}")
@@ -132,6 +146,10 @@ class EquirectangularNode(Node):
             self.set_parameters([
                 Parameter('cx_offset', Parameter.Type.DOUBLE, self.cx_offset),
                 Parameter('cy_offset', Parameter.Type.DOUBLE, self.cy_offset),
+                Parameter('front_cx_offset', Parameter.Type.DOUBLE, self.front_cx_offset),
+                Parameter('front_cy_offset', Parameter.Type.DOUBLE, self.front_cy_offset),
+                Parameter('back_cx_offset', Parameter.Type.DOUBLE, self.back_cx_offset),
+                Parameter('back_cy_offset', Parameter.Type.DOUBLE, self.back_cy_offset),
                 Parameter('crop_size', Parameter.Type.INTEGER, self.crop_size),
                 Parameter('translation', Parameter.Type.DOUBLE_ARRAY, [self.tx, self.ty, self.tz]),
                 Parameter('rotation_deg', Parameter.Type.DOUBLE_ARRAY, [
@@ -149,6 +167,10 @@ class EquirectangularNode(Node):
             print("  ros__parameters:")
             print(f"    cx_offset: {self.cx_offset}")
             print(f"    cy_offset: {self.cy_offset}")
+            print(f"    front_cx_offset: {self.front_cx_offset}")
+            print(f"    front_cy_offset: {self.front_cy_offset}")
+            print(f"    back_cx_offset: {self.back_cx_offset}")
+            print(f"    back_cy_offset: {self.back_cy_offset}")
             print(f"    crop_size: {self.crop_size}")
             print(f"    translation: [{self.tx}, {self.ty}, {self.tz}]")
             print(f"    rotation_deg: [{math.degrees(self.roll)}, {math.degrees(self.pitch)}, {math.degrees(self.yaw)}]")
@@ -169,7 +191,9 @@ class EquirectangularNode(Node):
         
         for param in params:
             # Check if a camera parameter was changed
-            if param.name in ['cx_offset', 'cy_offset', 'crop_size', 'translation', 'rotation_deg',
+            if param.name in ['cx_offset', 'cy_offset',
+                             'front_cx_offset', 'front_cy_offset', 'back_cx_offset', 'back_cy_offset',
+                             'crop_size', 'translation', 'rotation_deg',
                              'out_width', 'out_height', 'gpu']:
                 update_needed = True
                 
@@ -187,6 +211,10 @@ class EquirectangularNode(Node):
         # Update trackbar positions without triggering callbacks
         cv2.setTrackbarPos("CX Offset [-100,100]", self.control_window, int(self.cx_offset) + 100)
         cv2.setTrackbarPos("CY Offset [-100,100]", self.control_window, int(self.cy_offset) + 100)
+        cv2.setTrackbarPos("Front CX Offset [-100,100]", self.control_window, int(self.front_cx_offset) + 100)
+        cv2.setTrackbarPos("Front CY Offset [-100,100]", self.control_window, int(self.front_cy_offset) + 100)
+        cv2.setTrackbarPos("Back CX Offset [-100,100]", self.control_window, int(self.back_cx_offset) + 100)
+        cv2.setTrackbarPos("Back CY Offset [-100,100]", self.control_window, int(self.back_cy_offset) + 100)
         cv2.setTrackbarPos("Crop Size", self.control_window, self.crop_size)
         cv2.setTrackbarPos("TX [-0.5,0.5]", self.control_window, int(self.tx * 1000) + 500)
         cv2.setTrackbarPos("TY [-0.5,0.5]", self.control_window, int(self.ty * 1000) + 500)
@@ -233,8 +261,12 @@ class EquirectangularNode(Node):
         self.img_height = img_height
         self.img_width = img_width
         
-        self.cx = img_width / 2 + self.cx_offset
-        self.cy = img_height / 2 + self.cy_offset
+        base_cx = img_width / 2 + self.cx_offset
+        base_cy = img_height / 2 + self.cy_offset
+        self.front_cx = base_cx + self.front_cx_offset
+        self.front_cy = base_cy + self.front_cy_offset
+        self.back_cx = base_cx + self.back_cx_offset
+        self.back_cy = base_cy + self.back_cy_offset
         
         y, x = torch.meshgrid(
             torch.arange(self.out_height, dtype=torch.float32, device=self.device),
@@ -262,8 +294,8 @@ class EquirectangularNode(Node):
         self.front_map_x = torch.zeros((self.out_height, self.out_width), dtype=torch.float32, device=self.device)
         self.front_map_y = torch.zeros((self.out_height, self.out_width), dtype=torch.float32, device=self.device)
         
-        self.front_map_x[self.front_mask] = self.cx + X[self.front_mask] / r_front * r_fisheye_front
-        self.front_map_y[self.front_mask] = self.cy + Y[self.front_mask] / r_front * r_fisheye_front
+        self.front_map_x[self.front_mask] = self.front_cx + X[self.front_mask] / r_front * r_fisheye_front
+        self.front_map_y[self.front_mask] = self.front_cy + Y[self.front_mask] / r_front * r_fisheye_front
         
         back_X_tensor = X[self.back_mask]
         back_Y_tensor = Y[self.back_mask]
@@ -287,8 +319,8 @@ class EquirectangularNode(Node):
         self.back_map_x = torch.zeros((self.out_height, self.out_width), dtype=torch.float32, device=self.device)
         self.back_map_y = torch.zeros((self.out_height, self.out_width), dtype=torch.float32, device=self.device)
 
-        self.back_map_x[self.back_mask] = self.cx + X_back / r_back * r_fisheye_back
-        self.back_map_y[self.back_mask] = self.cy + Y_back / r_back * r_fisheye_back
+        self.back_map_x[self.back_mask] = self.back_cx + X_back / r_back * r_fisheye_back
+        self.back_map_y[self.back_mask] = self.back_cy + Y_back / r_back * r_fisheye_back
 
         self.front_map_x_np = self.front_map_x.cpu().numpy()
         self.front_map_y_np = self.front_map_y.cpu().numpy()
@@ -347,8 +379,8 @@ class EquirectangularNode(Node):
             front_img_full = dual_fisheye_img[:, midpoint:]
             back_img_full = dual_fisheye_img[:, :midpoint]
 
-            front_img_full = cv2.rotate(front_img_full, cv2.ROTATE_90_COUNTERCLOCKWISE)
-            back_img_full = cv2.rotate(back_img_full, cv2.ROTATE_90_CLOCKWISE)
+            # front_img_full = cv2.rotate(front_img_full, cv2.ROTATE_90_COUNTERCLOCKWISE)
+            # back_img_full = cv2.rotate(back_img_full, cv2.ROTATE_90_CLOCKWISE)
             
             # Store original uncropped images (always update in calibration mode)
             if self.calibration_mode or self.original_front_img is None or self.original_front_img.shape != front_img_full.shape:
@@ -510,6 +542,14 @@ class EquirectangularNode(Node):
         cv2.createTrackbar("CX Offset [-100,100]", self.control_window, int(self.cx_offset) + 100, 200, self.update_cx)
         
         cv2.createTrackbar("CY Offset [-100,100]", self.control_window, int(self.cy_offset) + 100, 200, self.update_cy)
+
+        cv2.createTrackbar("Front CX Offset [-100,100]", self.control_window, int(self.front_cx_offset) + 100, 200, self.update_front_cx)
+
+        cv2.createTrackbar("Front CY Offset [-100,100]", self.control_window, int(self.front_cy_offset) + 100, 200, self.update_front_cy)
+
+        cv2.createTrackbar("Back CX Offset [-100,100]", self.control_window, int(self.back_cx_offset) + 100, 200, self.update_back_cx)
+
+        cv2.createTrackbar("Back CY Offset [-100,100]", self.control_window, int(self.back_cy_offset) + 100, 200, self.update_back_cy)
         
         cv2.createTrackbar("Crop Size", self.control_window, self.crop_size, 1920, self.update_crop)
         
@@ -531,6 +571,18 @@ class EquirectangularNode(Node):
 
     def update_cy(self, value):
         self.cy_offset = float(value - 100)
+
+    def update_front_cx(self, value):
+        self.front_cx_offset = float(value - 100)
+
+    def update_front_cy(self, value):
+        self.front_cy_offset = float(value - 100)
+
+    def update_back_cx(self, value):
+        self.back_cx_offset = float(value - 100)
+
+    def update_back_cy(self, value):
+        self.back_cy_offset = float(value - 100)
         
     def update_crop(self, value: int):
         self.crop_size = value
@@ -573,6 +625,10 @@ class EquirectangularNode(Node):
         self.set_parameters([
             Parameter('cx_offset', Parameter.Type.DOUBLE, self.cx_offset),
             Parameter('cy_offset', Parameter.Type.DOUBLE, self.cy_offset),
+            Parameter('front_cx_offset', Parameter.Type.DOUBLE, self.front_cx_offset),
+            Parameter('front_cy_offset', Parameter.Type.DOUBLE, self.front_cy_offset),
+            Parameter('back_cx_offset', Parameter.Type.DOUBLE, self.back_cx_offset),
+            Parameter('back_cy_offset', Parameter.Type.DOUBLE, self.back_cy_offset),
             Parameter('crop_size', Parameter.Type.INTEGER, self.crop_size),
             Parameter('translation', Parameter.Type.DOUBLE_ARRAY, [self.tx, self.ty, self.tz]),
             Parameter('rotation_deg', Parameter.Type.DOUBLE_ARRAY, [
@@ -620,7 +676,9 @@ class EquirectangularNode(Node):
                 equirect_bgr = self._cached_equirect
         
         info_text = (
-            f"cx: {self.crop_size/2 + self.cx_offset:.1f}, cy: {self.crop_size/2 + self.cy_offset:.1f} | "
+            f"shared c: [{self.cx_offset:.1f}, {self.cy_offset:.1f}] | "
+            f"front c: [{self.front_cx_offset:.1f}, {self.front_cy_offset:.1f}] | "
+            f"back c: [{self.back_cx_offset:.1f}, {self.back_cy_offset:.1f}] | "
             f"crop: {self.crop_size} | "
             f"t: [{self.tx:.3f}, {self.ty:.3f}, {self.tz:.3f}] | "
             f"r: [{math.degrees(self.roll):.1f}, {math.degrees(self.pitch):.1f}, {math.degrees(self.yaw):.1f}]"
@@ -635,6 +693,16 @@ class EquirectangularNode(Node):
             (0, 255, 0), 
             2
         )
+
+        # Draw calibration guide lines.
+        h, w = equirect_bgr.shape[:2]
+        vertical_fractions = [1.0 / 8.0, 3.0 / 8.0, 0.5, 5.0 / 8.0, 7.0 / 8.0]
+        for frac in vertical_fractions:
+            x = min(max(int(round(w * frac)), 0), w - 1)
+            cv2.line(equirect_bgr, (x, 0), (x, h - 1), (0, 255, 0), 1, cv2.LINE_AA)
+
+        y_mid = min(max(int(round(h * 0.5)), 0), h - 1)
+        cv2.line(equirect_bgr, (0, y_mid), (w - 1, y_mid), (0, 255, 0), 1, cv2.LINE_AA)
         
         # Add instructions
         if equirect_bgr is not None:

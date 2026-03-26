@@ -35,6 +35,10 @@ private:
     // Parameters
     double cx_offset_;
     double cy_offset_;
+    double front_cx_offset_;
+    double front_cy_offset_;
+    double back_cx_offset_;
+    double back_cy_offset_;
     int crop_size_;
     double tx_, ty_, tz_;
     double roll_, pitch_, yaw_;
@@ -43,7 +47,6 @@ private:
     int out_height_;
     
     // Camera parameters
-    double cx_, cy_;
     cv::Mat back_to_front_rotation_;
     cv::Vec3d back_to_front_translation_;
     

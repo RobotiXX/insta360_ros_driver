@@ -14,6 +14,10 @@ EquirectangularNode::EquirectangularNode()
     // Declare parameters
     declare_parameter("cx_offset", 0.0);
     declare_parameter("cy_offset", 0.0);
+    declare_parameter("front_cx_offset", 0.0);
+    declare_parameter("front_cy_offset", 0.0);
+    declare_parameter("back_cx_offset", 0.0);
+    declare_parameter("back_cy_offset", 0.0);
     declare_parameter("crop_size", 960);
     declare_parameter("translation", std::vector<double>{0.0, 0.0, -0.105});
     declare_parameter("rotation_deg", std::vector<double>{-0.5, 0.0, 1.1});
@@ -55,6 +59,10 @@ void EquirectangularNode::loadParameters()
     try {
         cx_offset_ = get_parameter("cx_offset").as_double();
         cy_offset_ = get_parameter("cy_offset").as_double();
+        front_cx_offset_ = get_parameter("front_cx_offset").as_double();
+        front_cy_offset_ = get_parameter("front_cy_offset").as_double();
+        back_cx_offset_ = get_parameter("back_cx_offset").as_double();
+        back_cy_offset_ = get_parameter("back_cy_offset").as_double();
         crop_size_ = get_parameter("crop_size").as_int();
         out_width_ = get_parameter("out_width").as_int();
         out_height_ = get_parameter("out_height").as_int();
@@ -72,7 +80,9 @@ void EquirectangularNode::loadParameters()
         
         RCLCPP_INFO(get_logger(), "Loaded parameters from ROS parameter server");
         RCLCPP_INFO(get_logger(), "  Crop size: %d", crop_size_);
-        RCLCPP_INFO(get_logger(), "  Center offset: (%.1f, %.1f)", cx_offset_, cy_offset_);
+        RCLCPP_INFO(get_logger(), "  Shared center offset: (%.1f, %.1f)", cx_offset_, cy_offset_);
+        RCLCPP_INFO(get_logger(), "  Front center offset: (%.1f, %.1f)", front_cx_offset_, front_cy_offset_);
+        RCLCPP_INFO(get_logger(), "  Back center offset: (%.1f, %.1f)", back_cx_offset_, back_cy_offset_);
         RCLCPP_INFO(get_logger(), "  Translation: [%.3f, %.3f, %.3f]", tx_, ty_, tz_);
         RCLCPP_INFO(get_logger(), "  Rotation (deg): [%.1f, %.1f, %.1f]", 
                     rotation_deg[0], rotation_deg[1], rotation_deg[2]);
@@ -120,8 +130,12 @@ void EquirectangularNode::initMapping(int img_height, int img_width)
     img_height_ = img_height;
     img_width_ = img_width;
     
-    cx_ = img_width / 2.0 + cx_offset_;
-    cy_ = img_height / 2.0 + cy_offset_;
+    double base_cx = img_width / 2.0 + cx_offset_;
+    double base_cy = img_height / 2.0 + cy_offset_;
+    double front_cx = base_cx + front_cx_offset_;
+    double front_cy = base_cy + front_cy_offset_;
+    double back_cx = base_cx + back_cx_offset_;
+    double back_cy = base_cy + back_cy_offset_;
     
     // Create output coordinate grids
     cv::Mat x_grid, y_grid;
@@ -195,8 +209,8 @@ void EquirectangularNode::initMapping(int img_height, int img_width)
                 float theta = atan2(r, fabs(Z_val));
                 float r_fisheye = 2 * theta / M_PI * (img_width / 2.0);
                 
-                front_map_x_.at<float>(y, x) = cx_ + X_val / r * r_fisheye;
-                front_map_y_.at<float>(y, x) = cy_ + Y_val / r * r_fisheye;
+                front_map_x_.at<float>(y, x) = front_cx + X_val / r * r_fisheye;
+                front_map_y_.at<float>(y, x) = front_cy + Y_val / r * r_fisheye;
             }
         }
     }
@@ -221,8 +235,8 @@ void EquirectangularNode::initMapping(int img_height, int img_width)
                 float theta = atan2(r, fabs(Z_back));
                 float r_fisheye = 2 * theta / M_PI * (img_width / 2.0);
                 
-                back_map_x_.at<float>(y, x) = cx_ + X_back / r * r_fisheye;
-                back_map_y_.at<float>(y, x) = cy_ + Y_back / r * r_fisheye;
+                back_map_x_.at<float>(y, x) = back_cx + X_back / r * r_fisheye;
+                back_map_y_.at<float>(y, x) = back_cy + Y_back / r * r_fisheye;
             }
         }
     }
@@ -276,8 +290,8 @@ void EquirectangularNode::imageCallback(const sensor_msgs::msg::Image::SharedPtr
         cv::Mat front_img_full = dual_fisheye_img(cv::Rect(midpoint, 0, midpoint, img_height));
         cv::Mat back_img_full = dual_fisheye_img(cv::Rect(0, 0, midpoint, img_height));
         
-        cv::rotate(front_img_full, front_img_full, cv::ROTATE_90_COUNTERCLOCKWISE);
-        cv::rotate(back_img_full, back_img_full, cv::ROTATE_90_CLOCKWISE);
+        // cv::rotate(front_img_full, front_img_full, cv::ROTATE_90_COUNTERCLOCKWISE);
+        // cv::rotate(back_img_full, back_img_full, cv::ROTATE_90_CLOCKWISE);
         
         
         // Crop images based on crop_size parameter
@@ -340,6 +354,10 @@ rcl_interfaces::msg::SetParametersResult EquirectangularNode::parametersCallback
     for (const auto& param : parameters) {
         if (param.get_name() == "cx_offset" ||
             param.get_name() == "cy_offset" ||
+            param.get_name() == "front_cx_offset" ||
+            param.get_name() == "front_cy_offset" ||
+            param.get_name() == "back_cx_offset" ||
+            param.get_name() == "back_cy_offset" ||
             param.get_name() == "crop_size" ||
             param.get_name() == "translation" ||
             param.get_name() == "rotation_deg" ||

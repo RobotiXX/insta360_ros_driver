@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<launch>
+    <arg name="equirectangular_config" default="$(find-pkg-share insta360_ros_driver)/config/x4_calibration.yaml"/>
+    <arg name="compressed_topic" default="/dual_fisheye/image/compressed"/>
+    <arg name="uncompressed_topic" default="/dual_fisheye/image"/>
+    <arg name="skip_frame" default="0"/>
+    <arg name="i_frame_only" default="false"/>
+
+    <!-- Publishes compressed images from camera -->
+    <node pkg="insta360_ros_driver" exec="insta360_ros_driver" name="insta360_ros_driver" output="log"/>
+
+    <!-- Decodes compressed image stream -->
+    <node pkg="insta360_ros_driver" exec="decoder" name="image_decoder" output="log">
+        <param name="compressed_topic" value="$(var compressed_topic)"/>
+        <param name="uncompressed_topic" value="$(var uncompressed_topic)"/>
+        <param name="skip_frame" value="$(var skip_frame)"/>
+        <param name="i_frame_only" value="$(var i_frame_only)"/>
+    </node>
+
+    <!-- Runs Python equirectangular node with X4 calibration -->
+    <node pkg="insta360_ros_driver" exec="equirectangular_base.py" name="equirectangular_node" output="screen">
+        <param from="$(var equirectangular_config)"/>
+    </node>
+</launch>

@@ -91,141 +91,29 @@ This uses the [imu_filter_madgwick](https://wiki.ros.org/imu_filter_madgwick) pa
 
 ## Decoder Backends and Deployment Profiles
 
-This package supports several decode approaches. All of them share the same equirectangular mapping logic and calibration parameters, but they differ in decoder backend, performance, and dependency footprint.
+The package is now streamlined to a single maintained decode path plus optional split-pipeline integration.
 
 ### Quick Summary
 
 | Approach | Executable | Best For | Build Default |
 | --- | --- | --- | --- |
-| Combined FFmpeg (legacy/original) | `insta360_ros_driver_decoded_equirectangular` | Existing deployments, simple baseline | Yes |
-| Combined FFmpeg (V4L2-first) | `insta360_ros_driver_decoded_equirectangular_v4l2ffmpeg` | Jetson with FFmpeg fallback strategy | Yes |
-| Combined GStreamer (`nvv4l2decoder`) | `insta360_ros_driver_decoded_equirectangular_gst` | Jetson production path with good maintainability | Optional (auto if GStreamer dev libs found) |
-| Combined Jetson MMAPI (`NvVideoDecoder`) | `insta360_ros_driver_decoded_equirectangular_mmapi` | Lowest-level Jetson path (experimental) | Optional (`OFF` by default) |
+| Combined FFmpeg decode (dual-fisheye output) | `insta360_ros_driver_decoded` | Main supported decode path | Yes |
 | Split pipeline for ISAAC ROS | `h264_publisher.cpp` + `isaac_ros_h264_decoder` | NITROS/GXF ecosystem integration | Source scaffold only (see notes) |
 
-### Backend Decision Tree
+### 1) Combined FFmpeg Decode
 
-Use this as a fast picker during deployment:
+- Executable: `insta360_ros_driver_decoded`
+- Launch file: `launch/decoded_equirectangular_base.launch.xml`
 
-```mermaid
-flowchart TD
-  A[Start: choose decode backend] --> B{Running on Jetson Orin?}
-  B -->|No| C[Use Combined FFmpeg Original\ninsta360_ros_driver_decoded_equirectangular]
-  B -->|Yes| D{Need easiest Jetson production path?}
-  D -->|Yes| E[Use Combined GStreamer\ninsta360_ros_driver_decoded_equirectangular_gst]
-  D -->|No| F{Need lowest-level control\nor advanced tuning?}
-  F -->|Yes| G[Use Combined MMAPI (experimental)\ninsta360_ros_driver_decoded_equirectangular_mmapi]
-  F -->|No| H{Need minimal dependency footprint?}
-  H -->|Yes| I[Use V4L2-first FFmpeg\ninsta360_ros_driver_decoded_equirectangular_v4l2ffmpeg]
-  H -->|No| E
-  A --> J{Need ISAAC ROS/NITROS ecosystem?}
-  J -->|Yes| K[Use split pipeline\nh264_publisher + isaac_ros_h264_decoder]
-  J -->|No| B
-```
-
-Practical recommendation for Jetson AGX Orin:
-- Start with GStreamer (`nvv4l2decoder`) for best balance of performance and maintainability.
-- Move to MMAPI only if you need lower-level controls not exposed by GStreamer.
-- Keep V4L2-first FFmpeg as a robust fallback path.
-
-### 1) Combined FFmpeg (Original)
-
-- Launch file: `launch/decoded_equirectangular_cpp.launch.xml`
-- Typical command:
-
-```bash
-ros2 launch insta360_ros_driver decoded_equirectangular_cpp.launch.xml
-```
-
-Notes:
-- This path uses FFmpeg decode integrated in the same process as capture + equirect projection.
-- Good fallback when Jetson-specific dependencies are not installed.
-
-### 2) Combined FFmpeg (V4L2-first)
-
-- Executable: `insta360_ros_driver_decoded_equirectangular_v4l2ffmpeg`
-- Launch file: `launch/decoded_equirectangular_v4l2ffmpeg.launch.xml`
-- Typical command:
-
-```bash
-ros2 launch insta360_ros_driver decoded_equirectangular_v4l2ffmpeg.launch.xml
-```
-
-Decoder selection order inside this variant:
-1. `h264_nvv4l2dec`
-2. `h264_cuvid`
-3. FFmpeg software H.264 fallback
-
-This is a practical Jetson-friendly FFmpeg path with minimal extra dependencies.
-
-### 3) Combined GStreamer (`nvv4l2decoder`)
-
-- Executable: `insta360_ros_driver_decoded_equirectangular_gst`
-- Launch file: `launch/decoded_equirectangular_gst.launch.xml`
-
-Pipeline architecture in this node:
-- Camera SDK H.264 bytes -> `appsrc` -> `h264parse` -> `nvv4l2decoder` -> `nvvidconv`/`videoconvert` -> `appsink` -> equirectangular projection -> ROS publish
-
-Recommended for Jetson when you want strong hardware decode performance without moving to the lowest-level MMAPI implementation.
-
-Build requirements (Jetson):
-
-```bash
-sudo apt-get update
-sudo apt-get install -y \
-  nvidia-l4t-gstreamer \
-  libgstreamer1.0-dev \
-  libgstreamer-plugins-base1.0-dev
-```
-
-Build:
-
-```bash
-cd ~/ros2_ws
-colcon build --symlink-install --packages-select insta360_ros_driver
-```
+This mode runs camera capture and decode in one process and can be paired with the Python equirectangular node from the launch file.
 
 Run:
 
 ```bash
-ros2 launch insta360_ros_driver decoded_equirectangular_gst.launch.xml
+ros2 launch insta360_ros_driver decoded_equirectangular_base.launch.xml
 ```
 
-If GStreamer dev packages are missing, CMake skips this target and prints a warning.
-
-### 4) Combined Jetson MMAPI (`NvVideoDecoder`) (Experimental)
-
-- Executable: `insta360_ros_driver_decoded_equirectangular_mmapi`
-- Launch file: `launch/decoded_equirectangular_mmapi.launch.xml`
-- Source: `src/main_decoded_equirectangular_mmapi.cpp`
-
-This variant uses Jetson Multimedia API directly (`NvVideoDecoder`) with explicit output/capture plane management.
-
-Why use it:
-- Most direct Jetson decode integration.
-- Fine-grained control over decoder behavior.
-
-Trade-off:
-- More complex than GStreamer/FFmpeg paths.
-- Marked experimental and should be validated on target hardware.
-
-Enable build (disabled by default):
-
-```bash
-cd ~/ros2_ws
-colcon build --symlink-install --packages-select insta360_ros_driver \
-  --cmake-args -DBUILD_JETSON_MMAPI_COMBINED_NODE=ON
-```
-
-Run:
-
-```bash
-ros2 launch insta360_ros_driver decoded_equirectangular_mmapi.launch.xml
-```
-
-If Jetson Multimedia API headers/libs are not found (for example on non-Jetson hosts), this target is skipped.
-
-### 5) ISAAC ROS Split Pipeline (Optional Ecosystem Path)
+### 2) ISAAC ROS Split Pipeline (Optional Ecosystem Path)
 
 Files:
 - `src/h264_publisher.cpp`
@@ -250,29 +138,7 @@ colcon build --symlink-install --packages-select insta360_ros_driver
 
 Builds:
 - Core nodes
-- Original combined node
-- V4L2-first FFmpeg combined node
-- GStreamer combined node only if GStreamer dev packages are available
-
-### Profile B: Jetson with MMAPI enabled
-
-```bash
-cd ~/ros2_ws
-colcon build --symlink-install --packages-select insta360_ros_driver \
-  --cmake-args -DBUILD_JETSON_MMAPI_COMBINED_NODE=ON
-```
-
-Builds Profile A + MMAPI combined node if Jetson MMAPI headers/libs are found.
-
-### Profile C: Force-disable GStreamer combined node
-
-```bash
-cd ~/ros2_ws
-colcon build --symlink-install --packages-select insta360_ros_driver \
-  --cmake-args -DBUILD_GSTREAMER_COMBINED_NODE=OFF
-```
-
-Useful for quick iteration when only FFmpeg/MMAPI variants are being tested.
+- Combined FFmpeg decode path (`insta360_ros_driver_decoded`)
 
 ## Runtime Validation Checklist
 

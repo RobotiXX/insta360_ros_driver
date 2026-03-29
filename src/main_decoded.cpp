@@ -557,7 +557,7 @@ private:
         ins_camera::LiveStreamParam param;
         param.video_resolution = ins_camera::VideoResolution::RES_2560_1280P60;
         param.lrv_video_resulution = ins_camera::VideoResolution::RES_1440_720P30;
-        param.video_bitrate = 1024 * 1024 *2;
+        param.video_bitrate = 1024 * 1024 /2;
         param.enable_audio = false;
         param.using_lrv = false;
 

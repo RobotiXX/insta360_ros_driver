@@ -11,6 +11,7 @@ find_package(rclcpp REQUIRED)
 find_package(camera_info_manager REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(image_transport REQUIRED)
+find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
 find_package(imu_tools REQUIRED)
@@ -105,6 +106,30 @@ ament_target_dependencies(equirectangular_cpp
 target_link_libraries(equirectangular_cpp ${OpenCV_LIBRARIES})
 
 install(TARGETS equirectangular_cpp
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+add_executable(equirectangular_crop_cpp src/equirectangular_crop.cpp)
+ament_target_dependencies(equirectangular_crop_cpp
+  rclcpp
+  cv_bridge
+  OpenCV
+)
+target_link_libraries(equirectangular_crop_cpp ${OpenCV_LIBRARIES})
+
+install(TARGETS equirectangular_crop_cpp
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+add_executable(equirectangular_crop_h264 src/equirectangular_crop_h264.cpp)
+ament_target_dependencies(equirectangular_crop_h264
+  rclcpp
+  sensor_msgs
+  OpenCV
+)
+target_link_libraries(equirectangular_crop_h264 ${OpenCV_LIBRARIES} ${AVCODEC_LIBRARIES} ${AVFORMAT_LIBRARIES} ${AVUTIL_LIBRARIES} ${SWSCALE_LIBRARIES})
+
+install(TARGETS equirectangular_crop_h264
   DESTINATION lib/${PROJECT_NAME}
 )
 

@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<launch>
+    <arg name="equirectangular_config" default="$(find-pkg-share insta360_ros_driver)/config/x4_calibration.yaml"/>
+    <arg name="skip_frame" default="1"/>
+    <arg name="i_frame_only" default="false"/>
+    <arg name="enable_in_camera_stitching" default="true"/>
+    <arg name="publish_nv12" default="true"/>
+    <arg name="crop_out_height" default="640"/>
+
+    <node pkg="insta360_ros_driver" exec="insta360_ros_driver_decoded" name="insta360_decoded_node" output="screen">
+        <param name="skip_frame" value="$(var skip_frame)"/>
+        <param name="i_frame_only" value="$(var i_frame_only)"/>
+        <param name="enable_in_camera_stitching" value="$(var enable_in_camera_stitching)"/>
+        <param name="publish_nv12" value="$(var publish_nv12)"/>
+    </node>
+
+    <node pkg="insta360_ros_driver" exec="equirectangular_crop_cpp" name="equirectangular_node" output="screen">
+        <param from="$(var equirectangular_config)"/>
+        <param name="crop_out_height" value="$(var crop_out_height)"/>
+    </node>
+</launch>

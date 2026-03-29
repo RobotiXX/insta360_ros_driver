@@ -1,17 +1,17 @@
-#include "equirectangular.hpp"
-#include <rcl_interfaces/msg/set_parameters_result.hpp>
-#include <cmath>
-#include <thread>
-#include <chrono>
+#include "equirectangular_crop.hpp"
 
-EquirectangularNode::EquirectangularNode()
-    : Node("equirectangular_node"),
+#include <rcl_interfaces/msg/set_parameters_result.hpp>
+
+#include <algorithm>
+#include <cmath>
+
+EquirectangularCropNode::EquirectangularCropNode()
+    : Node("equirectangular_crop_node"),
       maps_initialized_(false),
       params_changed_(true),
       img_height_(0),
       img_width_(0)
 {
-    // Declare parameters
     declare_parameter("cx_offset", 0.0);
     declare_parameter("cy_offset", 0.0);
     declare_parameter("front_cx_offset", 0.0);
@@ -24,37 +24,32 @@ EquirectangularNode::EquirectangularNode()
     declare_parameter("gpu", true);
     declare_parameter("out_width", 1920);
     declare_parameter("out_height", 960);
-    
-    // Load parameters
+    declare_parameter("crop_out_height", 640);
+
     loadParameters();
-    
-    // Log GPU settings (note: C++ version currently only supports CPU)
-    RCLCPP_INFO(get_logger(), "C++ equirectangular node");
-    
-    
-    // Add parameter callback
+
+    RCLCPP_INFO(get_logger(), "C++ cropped equirectangular node");
+
     params_callback_handle_ = add_on_set_parameters_callback(
-        std::bind(&EquirectangularNode::parametersCallback, this, std::placeholders::_1));
-    
+        std::bind(&EquirectangularCropNode::parametersCallback, this, std::placeholders::_1));
+
     updateCameraParameters();
-    
-    // Configure QoS (use best-effort for lower-latency image streaming)
+
     auto qos = rclcpp::QoS(10).best_effort();
-    
-    // Create publishers and subscribers
+
     dual_fisheye_sub_ = create_subscription<sensor_msgs::msg::Image>(
         "/dual_fisheye/image", qos,
-        std::bind(&EquirectangularNode::imageCallback, this, std::placeholders::_1));
-    
+        std::bind(&EquirectangularCropNode::imageCallback, this, std::placeholders::_1));
+
     equirect_pub_ = create_publisher<sensor_msgs::msg::Image>(
         "/equirectangular/image", qos);
 }
 
-EquirectangularNode::~EquirectangularNode()
+EquirectangularCropNode::~EquirectangularCropNode()
 {
 }
 
-void EquirectangularNode::loadParameters()
+void EquirectangularCropNode::loadParameters()
 {
     try {
         cx_offset_ = get_parameter("cx_offset").as_double();
@@ -66,27 +61,42 @@ void EquirectangularNode::loadParameters()
         crop_size_ = get_parameter("crop_size").as_int();
         out_width_ = get_parameter("out_width").as_int();
         out_height_ = get_parameter("out_height").as_int();
+        crop_out_height_ = get_parameter("crop_out_height").as_int();
         gpu_enabled_ = get_parameter("gpu").as_bool();
-        
+
         auto translation = get_parameter("translation").as_double_array();
         tx_ = translation[0];
         ty_ = translation[1];
         tz_ = translation[2];
-        
+
         auto rotation_deg = get_parameter("rotation_deg").as_double_array();
         roll_ = rotation_deg[0] * M_PI / 180.0;
         pitch_ = rotation_deg[1] * M_PI / 180.0;
         yaw_ = rotation_deg[2] * M_PI / 180.0;
-        
+
+        if (crop_out_height_ <= 0) {
+            RCLCPP_WARN(get_logger(), "crop_out_height must be positive, clamping to 1");
+            crop_out_height_ = 1;
+        }
+        if (crop_out_height_ > out_height_) {
+            RCLCPP_WARN(
+                get_logger(),
+                "crop_out_height (%d) exceeds out_height (%d), clamping to out_height",
+                crop_out_height_,
+                out_height_);
+            crop_out_height_ = out_height_;
+        }
+
         RCLCPP_INFO(get_logger(), "Loaded parameters from ROS parameter server");
         RCLCPP_INFO(get_logger(), "  Crop size: %d", crop_size_);
         RCLCPP_INFO(get_logger(), "  Shared center offset: (%.1f, %.1f)", cx_offset_, cy_offset_);
         RCLCPP_INFO(get_logger(), "  Front center offset: (%.1f, %.1f)", front_cx_offset_, front_cy_offset_);
         RCLCPP_INFO(get_logger(), "  Back center offset: (%.1f, %.1f)", back_cx_offset_, back_cy_offset_);
         RCLCPP_INFO(get_logger(), "  Translation: [%.3f, %.3f, %.3f]", tx_, ty_, tz_);
-        RCLCPP_INFO(get_logger(), "  Rotation (deg): [%.1f, %.1f, %.1f]", 
+        RCLCPP_INFO(get_logger(), "  Rotation (deg): [%.1f, %.1f, %.1f]",
                     rotation_deg[0], rotation_deg[1], rotation_deg[2]);
-        RCLCPP_INFO(get_logger(), "  Output size: %dx%d", out_width_, out_height_);
+        RCLCPP_INFO(get_logger(), "  Virtual output size: %dx%d", out_width_, out_height_);
+        RCLCPP_INFO(get_logger(), "  Published cropped output size: %dx%d", out_width_, crop_out_height_);
         RCLCPP_INFO(get_logger(), "  GPU enabled: %s", gpu_enabled_ ? "true" : "false");
     } catch (const std::exception& e) {
         RCLCPP_ERROR(get_logger(), "Error loading parameters: %s", e.what());
@@ -95,187 +105,169 @@ void EquirectangularNode::loadParameters()
     }
 }
 
-void EquirectangularNode::updateCameraParameters()
+void EquirectangularCropNode::updateCameraParameters()
 {
-    // Build rotation matrix
     cv::Mat Rx = (cv::Mat_<double>(3, 3) <<
         1.0, 0.0, 0.0,
         0.0, cos(roll_), -sin(roll_),
         0.0, sin(roll_), cos(roll_));
-    
+
     cv::Mat Ry = (cv::Mat_<double>(3, 3) <<
         cos(pitch_), 0.0, sin(pitch_),
         0.0, 1.0, 0.0,
         -sin(pitch_), 0.0, cos(pitch_));
-    
+
     cv::Mat Rz = (cv::Mat_<double>(3, 3) <<
         cos(yaw_), -sin(yaw_), 0.0,
         sin(yaw_), cos(yaw_), 0.0,
         0.0, 0.0, 1.0);
-    
+
     back_to_front_rotation_ = Rz * Ry * Rx;
     back_to_front_translation_ = cv::Vec3d(tx_, ty_, tz_);
-    
+
     if (maps_initialized_) {
         maps_initialized_ = false;
         RCLCPP_INFO(get_logger(), "Parameters updated, remapping will occur on next image");
     }
 }
 
-void EquirectangularNode::initMapping(int img_height, int img_width)
+void EquirectangularCropNode::initMapping(int img_height, int img_width)
 {
-    RCLCPP_INFO(get_logger(), "Initializing equirectangular projection: fusing two %dx%d fisheye images to %dx%d",
-                img_width, img_height, out_width_, out_height_);
-    
+    RCLCPP_INFO(
+        get_logger(),
+        "Initializing cropped equirectangular projection: fusing two %dx%d fisheye images to %dx%d from virtual %dx%d",
+        img_width, img_height, out_width_, crop_out_height_, out_width_, out_height_);
+
     img_height_ = img_height;
     img_width_ = img_width;
-    
-    double base_cx = img_width / 2.0 + cx_offset_;
-    double base_cy = img_height / 2.0 + cy_offset_;
-    double front_cx = base_cx + front_cx_offset_;
-    double front_cy = base_cy + front_cy_offset_;
-    double back_cx = base_cx + back_cx_offset_;
-    double back_cy = base_cy + back_cy_offset_;
-    
-    // Create output coordinate grids
+
+    const double base_cx = img_width / 2.0 + cx_offset_;
+    const double base_cy = img_height / 2.0 + cy_offset_;
+    const double front_cx = base_cx + front_cx_offset_;
+    const double front_cy = base_cy + front_cy_offset_;
+    const double back_cx = base_cx + back_cx_offset_;
+    const double back_cy = base_cy + back_cy_offset_;
+
     cv::Mat x_grid, y_grid;
     cv::Mat x_range = cv::Mat::zeros(1, out_width_, CV_32F);
-    cv::Mat y_range = cv::Mat::zeros(out_height_, 1, CV_32F);
-    
-    for (int i = 0; i < out_width_; ++i) {
-        x_range.at<float>(0, i) = static_cast<float>(i);
+    cv::Mat y_range = cv::Mat::zeros(crop_out_height_, 1, CV_32F);
+
+    const float crop_y_offset = static_cast<float>(out_height_ - crop_out_height_) / 2.0f;
+
+    for (int x = 0; x < out_width_; ++x) {
+        x_range.at<float>(0, x) = static_cast<float>(x);
     }
-    for (int i = 0; i < out_height_; ++i) {
-        y_range.at<float>(i, 0) = static_cast<float>(i);
+    for (int y = 0; y < crop_out_height_; ++y) {
+        y_range.at<float>(y, 0) = static_cast<float>(y) + crop_y_offset;
     }
-    
-    cv::repeat(x_range, out_height_, 1, x_grid);
+
+    cv::repeat(x_range, crop_out_height_, 1, x_grid);
     cv::repeat(y_range, 1, out_width_, y_grid);
-    
-    // Convert to spherical coordinates
-    // Note: x=0 corresponds to lon=-π, x=out_width-1 corresponds to lon=π*(out_width-1)/out_width
-    cv::Mat longitude = (x_grid / (float)out_width_) * 2 * M_PI - M_PI;
-    cv::Mat latitude = (y_grid / (float)out_height_) * M_PI - M_PI / 2;
-    
-    cv::Mat X, Y, Z;
-    cv::Mat cos_lat, sin_lat, cos_lon, sin_lon;
-    
-    cv::exp(-latitude, cos_lat); // Using exp(-x) as intermediate for cos calculation
-    cos_lat = (1 - cos_lat) / (1 + cos_lat); // Convert to cos
-    cv::sqrt(1 - cos_lat.mul(cos_lat), sin_lat);
-    
-    cv::exp(-longitude, cos_lon);
-    cos_lon = (1 - cos_lon) / (1 + cos_lon);
-    cv::sqrt(1 - cos_lon.mul(cos_lon), sin_lon);
-    
-    // Correct calculation
-    cv::Mat cos_latitude, sin_latitude;
-    for (int y = 0; y < out_height_; ++y) {
+
+    cv::Mat longitude = (x_grid / static_cast<float>(out_width_)) * 2.0f * static_cast<float>(M_PI) - static_cast<float>(M_PI);
+    cv::Mat latitude = (y_grid / static_cast<float>(out_height_)) * static_cast<float>(M_PI) - static_cast<float>(M_PI) / 2.0f;
+
+    cv::Mat X(crop_out_height_, out_width_, CV_32F);
+    cv::Mat Y(crop_out_height_, out_width_, CV_32F);
+    cv::Mat Z(crop_out_height_, out_width_, CV_32F);
+
+    for (int y = 0; y < crop_out_height_; ++y) {
         for (int x = 0; x < out_width_; ++x) {
-            float lat = latitude.at<float>(y, x);
-            float lon = longitude.at<float>(y, x);
-            cos_lat.at<float>(y, x) = cos(lat);
-            sin_lat.at<float>(y, x) = sin(lat);
-            cos_lon.at<float>(y, x) = cos(lon);
-            sin_lon.at<float>(y, x) = sin(lon);
+            const float lat = latitude.at<float>(y, x);
+            const float lon = longitude.at<float>(y, x);
+            const float cos_lat = std::cos(lat);
+            X.at<float>(y, x) = cos_lat * std::sin(lon);
+            Y.at<float>(y, x) = std::sin(lat);
+            Z.at<float>(y, x) = cos_lat * std::cos(lon);
         }
     }
-    
-    X = cos_lat.mul(sin_lon);
-    Y = sin_lat;
-    Z = cos_lat.mul(cos_lon);
-    
-    // Create masks
+
     front_mask_ = Z >= 0;
     back_mask_ = Z < 0;
-    
-    // Initialize mapping matrices
-    front_map_x_ = cv::Mat::zeros(out_height_, out_width_, CV_32F);
-    front_map_y_ = cv::Mat::zeros(out_height_, out_width_, CV_32F);
-    back_map_x_ = cv::Mat::zeros(out_height_, out_width_, CV_32F);
-    back_map_y_ = cv::Mat::zeros(out_height_, out_width_, CV_32F);
-    
-    // Process front hemisphere
-    for (int y = 0; y < out_height_; ++y) {
+
+    front_map_x_ = cv::Mat::zeros(crop_out_height_, out_width_, CV_32F);
+    front_map_y_ = cv::Mat::zeros(crop_out_height_, out_width_, CV_32F);
+    back_map_x_ = cv::Mat::zeros(crop_out_height_, out_width_, CV_32F);
+    back_map_y_ = cv::Mat::zeros(crop_out_height_, out_width_, CV_32F);
+
+    for (int y = 0; y < crop_out_height_; ++y) {
         for (int x = 0; x < out_width_; ++x) {
-            if (front_mask_.at<uchar>(y, x)) {
-                float X_val = X.at<float>(y, x);
-                float Y_val = Y.at<float>(y, x);
-                float Z_val = Z.at<float>(y, x);
-                
-                float r = sqrt(X_val * X_val + Y_val * Y_val);
-                if (r < 1e-6) r = 1e-6;
-                
-                float theta = atan2(r, fabs(Z_val));
-                float r_fisheye = 2 * theta / M_PI * (img_width / 2.0);
-                
-                front_map_x_.at<float>(y, x) = front_cx + X_val / r * r_fisheye;
-                front_map_y_.at<float>(y, x) = front_cy + Y_val / r * r_fisheye;
+            if (!front_mask_.at<uchar>(y, x)) {
+                continue;
             }
+
+            const float x_val = X.at<float>(y, x);
+            const float y_val = Y.at<float>(y, x);
+            const float z_val = Z.at<float>(y, x);
+
+            float r = std::sqrt(x_val * x_val + y_val * y_val);
+            if (r < 1e-6f) {
+                r = 1e-6f;
+            }
+
+            const float theta = std::atan2(r, std::fabs(z_val));
+            const float r_fisheye = 2.0f * theta / static_cast<float>(M_PI) * (img_width / 2.0f);
+
+            front_map_x_.at<float>(y, x) = static_cast<float>(front_cx) + x_val / r * r_fisheye;
+            front_map_y_.at<float>(y, x) = static_cast<float>(front_cy) + y_val / r * r_fisheye;
         }
     }
-    
-    // Process back hemisphere
-    for (int y = 0; y < out_height_; ++y) {
+
+    for (int y = 0; y < crop_out_height_; ++y) {
         for (int x = 0; x < out_width_; ++x) {
-            if (back_mask_.at<uchar>(y, x)) {
-                cv::Vec3d point(X.at<float>(y, x), Y.at<float>(y, x), Z.at<float>(y, x));
-                
-                // Transform point
-                cv::Mat point_mat = cv::Mat(point);
-                cv::Mat transformed = back_to_front_rotation_ * point_mat + cv::Mat(back_to_front_translation_);
-                
-                float X_back = -transformed.at<double>(0);
-                float Y_back = transformed.at<double>(1);
-                float Z_back = transformed.at<double>(2);
-                
-                float r = sqrt(X_back * X_back + Y_back * Y_back);
-                if (r < 1e-6) r = 1e-6;
-                
-                float theta = atan2(r, fabs(Z_back));
-                float r_fisheye = 2 * theta / M_PI * (img_width / 2.0);
-                
-                back_map_x_.at<float>(y, x) = back_cx + X_back / r * r_fisheye;
-                back_map_y_.at<float>(y, x) = back_cy + Y_back / r * r_fisheye;
+            if (!back_mask_.at<uchar>(y, x)) {
+                continue;
             }
+
+            cv::Vec3d point(X.at<float>(y, x), Y.at<float>(y, x), Z.at<float>(y, x));
+            const cv::Mat transformed = back_to_front_rotation_ * cv::Mat(point) + cv::Mat(back_to_front_translation_);
+
+            const float x_back = static_cast<float>(-transformed.at<double>(0));
+            const float y_back = static_cast<float>(transformed.at<double>(1));
+            const float z_back = static_cast<float>(transformed.at<double>(2));
+
+            float r = std::sqrt(x_back * x_back + y_back * y_back);
+            if (r < 1e-6f) {
+                r = 1e-6f;
+            }
+
+            const float theta = std::atan2(r, std::fabs(z_back));
+            const float r_fisheye = 2.0f * theta / static_cast<float>(M_PI) * (img_width / 2.0f);
+
+            back_map_x_.at<float>(y, x) = static_cast<float>(back_cx) + x_back / r * r_fisheye;
+            back_map_y_.at<float>(y, x) = static_cast<float>(back_cy) + y_back / r * r_fisheye;
         }
     }
-    
+
     maps_initialized_ = true;
-    
-    RCLCPP_INFO(get_logger(), "Mapping matrices initialization complete");
+
+    RCLCPP_INFO(get_logger(), "Cropped mapping matrices initialization complete");
 }
 
-cv::Mat EquirectangularNode::createEquirectangular(const cv::Mat& front_img, const cv::Mat& back_img)
+cv::Mat EquirectangularCropNode::createEquirectangular(const cv::Mat& front_img, const cv::Mat& back_img)
 {
     if (!maps_initialized_ || params_changed_ ||
         front_img.rows != img_height_ || front_img.cols != img_width_) {
         initMapping(front_img.rows, front_img.cols);
         params_changed_ = false;
     }
-    
+
     if (!maps_initialized_) {
         RCLCPP_ERROR(get_logger(), "Mapping arrays not properly initialized");
-        return cv::Mat::zeros(out_height_, out_width_, CV_8UC3);
+        return cv::Mat::zeros(crop_out_height_, out_width_, CV_8UC3);
     }
-    
+
     cv::Mat front_result, back_result;
     cv::remap(front_img, front_result, front_map_x_, front_map_y_, cv::INTER_CUBIC, cv::BORDER_CONSTANT, cv::Scalar(0, 0, 0));
     cv::remap(back_img, back_result, back_map_x_, back_map_y_, cv::INTER_CUBIC, cv::BORDER_CONSTANT, cv::Scalar(0, 0, 0));
-    
-    cv::Mat equirect = cv::Mat::zeros(out_height_, out_width_, CV_8UC3);
-    
-    // Apply masks
-    cv::Mat front = front_mask_;
-    cv::Mat back  = ~front_mask_;
-    
-    front_result.copyTo(equirect, front);
-    back_result.copyTo(equirect, back);
 
+    cv::Mat equirect = cv::Mat::zeros(crop_out_height_, out_width_, CV_8UC3);
+    front_result.copyTo(equirect, front_mask_);
+    back_result.copyTo(equirect, back_mask_);
     return equirect;
 }
 
-void EquirectangularNode::maybeLogPerformance()
+void EquirectangularCropNode::maybeLogPerformance()
 {
     const auto now_tp = std::chrono::steady_clock::now();
     const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now_tp - perf_window_start_).count();
@@ -306,7 +298,7 @@ void EquirectangularNode::maybeLogPerformance()
 
     RCLCPP_INFO(
         get_logger(),
-        "Equirect stats: processed=%.1f fps, avg_total=%.2f ms, avg_convert=%.2f ms, avg_crop=%.2f ms, avg_map_init=%.2f ms, avg_remap=%.2f ms, avg_publish=%.2f ms",
+        "Equirect crop stats: processed=%.1f fps, avg_total=%.2f ms, avg_convert=%.2f ms, avg_crop=%.2f ms, avg_map_init=%.2f ms, avg_remap=%.2f ms, avg_publish=%.2f ms",
         processed_fps,
         avg_total_ms,
         avg_convert_ms,
@@ -325,8 +317,7 @@ void EquirectangularNode::maybeLogPerformance()
     perf_window_start_ = now_tp;
 }
 
-
-void EquirectangularNode::imageCallback(const sensor_msgs::msg::Image::SharedPtr dual_fisheye_msg)
+void EquirectangularCropNode::imageCallback(const sensor_msgs::msg::Image::SharedPtr dual_fisheye_msg)
 {
     try {
         const auto total_start = std::chrono::steady_clock::now();
@@ -335,29 +326,24 @@ void EquirectangularNode::imageCallback(const sensor_msgs::msg::Image::SharedPtr
         cv_bridge::CvImagePtr cv_ptr = cv_bridge::toCvCopy(dual_fisheye_msg, "rgb8");
         cv::Mat dual_fisheye_img = cv_ptr->image;
         const auto convert_end = std::chrono::steady_clock::now();
-        
-        int img_height = dual_fisheye_img.rows;
-        int img_width_full = dual_fisheye_img.cols;
-        int midpoint = img_width_full / 2;
-        
+
+        const int img_height = dual_fisheye_img.rows;
+        const int img_width_full = dual_fisheye_img.cols;
+        const int midpoint = img_width_full / 2;
+
         const auto crop_start = std::chrono::steady_clock::now();
         cv::Mat front_img_full = dual_fisheye_img(cv::Rect(midpoint, 0, midpoint, img_height));
         cv::Mat back_img_full = dual_fisheye_img(cv::Rect(0, 0, midpoint, img_height));
-        
-        // cv::rotate(front_img_full, front_img_full, cv::ROTATE_90_COUNTERCLOCKWISE);
-        // cv::rotate(back_img_full, back_img_full, cv::ROTATE_90_CLOCKWISE);
-        
-        
-        // Crop images based on crop_size parameter
+
         cv::Mat front_img, back_img;
-        int current_crop_size = crop_size_;
-        int orig_h = front_img_full.rows;
-        int orig_w = front_img_full.cols;
-        
+        const int current_crop_size = crop_size_;
+        const int orig_h = front_img_full.rows;
+        const int orig_w = front_img_full.cols;
+
         if (orig_h != current_crop_size || orig_w != current_crop_size) {
-            int y_start = (orig_h - current_crop_size) / 2;
-            int x_start = (orig_w - current_crop_size) / 2;
-            
+            const int y_start = (orig_h - current_crop_size) / 2;
+            const int x_start = (orig_w - current_crop_size) / 2;
+
             if (y_start >= 0 && x_start >= 0 &&
                 y_start + current_crop_size <= orig_h &&
                 x_start + current_crop_size <= orig_w) {
@@ -372,9 +358,7 @@ void EquirectangularNode::imageCallback(const sensor_msgs::msg::Image::SharedPtr
             back_img = back_img_full;
         }
         const auto crop_end = std::chrono::steady_clock::now();
-        
-        
-        // Initialize mapping if needed
+
         uint64_t map_init_us = 0;
         if (!maps_initialized_ || params_changed_ ||
             front_img.rows != img_height_ || front_img.cols != img_width_) {
@@ -385,12 +369,11 @@ void EquirectangularNode::imageCallback(const sensor_msgs::msg::Image::SharedPtr
                 std::chrono::duration_cast<std::chrono::microseconds>(map_init_end - map_init_start).count());
             params_changed_ = false;
         }
-        
+
         const auto remap_start = std::chrono::steady_clock::now();
         cv::Mat equirect_img = createEquirectangular(front_img, back_img);
         const auto remap_end = std::chrono::steady_clock::now();
-        
-        // Publish result
+
         const auto publish_start = std::chrono::steady_clock::now();
         cv_bridge::CvImage out_msg;
         out_msg.header = dual_fisheye_msg->header;
@@ -413,7 +396,6 @@ void EquirectangularNode::imageCallback(const sensor_msgs::msg::Image::SharedPtr
             std::chrono::duration_cast<std::chrono::microseconds>(total_end - total_start).count());
         ++processed_frame_counter_;
         maybeLogPerformance();
-        
     } catch (const cv_bridge::Exception& e) {
         RCLCPP_ERROR(get_logger(), "cv_bridge exception: %s", e.what());
     } catch (const std::exception& e) {
@@ -421,11 +403,11 @@ void EquirectangularNode::imageCallback(const sensor_msgs::msg::Image::SharedPtr
     }
 }
 
-rcl_interfaces::msg::SetParametersResult EquirectangularNode::parametersCallback(
-    const std::vector<rclcpp::Parameter> &parameters)
+rcl_interfaces::msg::SetParametersResult EquirectangularCropNode::parametersCallback(
+    const std::vector<rclcpp::Parameter>& parameters)
 {
     bool update_needed = false;
-    
+
     for (const auto& param : parameters) {
         if (param.get_name() == "cx_offset" ||
             param.get_name() == "cy_offset" ||
@@ -438,34 +420,34 @@ rcl_interfaces::msg::SetParametersResult EquirectangularNode::parametersCallback
             param.get_name() == "rotation_deg" ||
             param.get_name() == "out_width" ||
             param.get_name() == "out_height" ||
+            param.get_name() == "crop_out_height" ||
             param.get_name() == "gpu") {
             update_needed = true;
         }
     }
-    
+
     if (update_needed) {
         loadParameters();
         updateCameraParameters();
     }
-    
+
     rcl_interfaces::msg::SetParametersResult result;
     result.successful = true;
     return result;
 }
 
-
 int main(int argc, char** argv)
 {
     rclcpp::init(argc, argv);
-    
-    auto node = std::make_shared<EquirectangularNode>();
-    
+
+    auto node = std::make_shared<EquirectangularCropNode>();
+
     try {
         rclcpp::spin(node);
     } catch (const std::exception& e) {
         RCLCPP_ERROR(node->get_logger(), "Exception during spin: %s", e.what());
     }
-    
+
     rclcpp::shutdown();
     return 0;
 }

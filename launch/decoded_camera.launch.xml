@@ -2,10 +2,14 @@
 <launch>
     <arg name="skip_frame" default="0"/>
     <arg name="i_frame_only" default="false"/>
+    <arg name="enable_in_camera_stitching" default="true"/>
+    <arg name="publish_nv12" default="true"/>
 
     <!-- Camera stream + integrated FFmpeg decode in one process -->
     <node pkg="insta360_ros_driver" exec="insta360_ros_driver_decoded" name="insta360_decoded_node" output="screen">
         <param name="skip_frame" value="$(var skip_frame)"/>
         <param name="i_frame_only" value="$(var i_frame_only)"/>
+        <param name="enable_in_camera_stitching" value="$(var enable_in_camera_stitching)"/>
+        <param name="publish_nv12" value="$(var publish_nv12)"/>
     </node>
 </launch>

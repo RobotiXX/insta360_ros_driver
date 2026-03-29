@@ -38,8 +38,8 @@ EquirectangularNode::EquirectangularNode()
     
     updateCameraParameters();
     
-    // Configure QoS
-    auto qos = rclcpp::QoS(1).reliable();
+    // Configure QoS (use best-effort for lower-latency image streaming)
+    auto qos = rclcpp::QoS(10).best_effort();
     
     // Create publishers and subscribers
     dual_fisheye_sub_ = create_subscription<sensor_msgs::msg::Image>(

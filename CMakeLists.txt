@@ -23,14 +23,40 @@ pkg_search_module(SWSCALE REQUIRED libswscale)
 pkg_check_modules(GSTREAMER QUIET gstreamer-1.0 gstreamer-app-1.0 gstreamer-video-1.0)
 
 option(BUILD_GSTREAMER_COMBINED_NODE "Build GStreamer+nvv4l2decoder combined node" ON)
-option(BUILD_JETSON_MMAPI_COMBINED_NODE "Build direct Jetson Multimedia API combined node" OFF)
+option(BUILD_JETSON_MMAPI_COMBINED_NODE "Build direct Jetson Multimedia API combined node" ON)
 
 find_path(JETSON_MMAPI_INCLUDE_DIR
   NAMES NvVideoDecoder.h
   PATHS /usr/src/jetson_multimedia_api/include
 )
-find_library(JETSON_NVBUF_UTILS_LIB NAMES nvbuf_utils)
+find_path(JETSON_MMAPI_CLASSES_DIR
+  NAMES NvVideoDecoder.cpp
+  PATHS /usr/src/jetson_multimedia_api/samples/common/classes
+)
+find_library(JETSON_NVBUF_SURFACE_LIB
+  NAMES nvbufsurface
+  PATHS
+    /usr/lib/aarch64-linux-gnu/nvidia
+    /usr/lib/aarch64-linux-gnu
+    /usr/lib
+)
+find_library(JETSON_NVBUFSURFTRANSFORM_LIB
+  NAMES nvbufsurftransform
+  PATHS
+    /usr/lib/aarch64-linux-gnu/nvidia
+    /usr/lib/aarch64-linux-gnu
+    /usr/lib
+)
 find_library(JETSON_V4L2_LIB NAMES v4l2)
+
+set(JETSON_MMAPI_BUFFER_LIBS "")
+if(JETSON_NVBUF_SURFACE_LIB)
+  # JetPack 6.x path.
+  list(APPEND JETSON_MMAPI_BUFFER_LIBS ${JETSON_NVBUF_SURFACE_LIB})
+  if(JETSON_NVBUFSURFTRANSFORM_LIB)
+    list(APPEND JETSON_MMAPI_BUFFER_LIBS ${JETSON_NVBUFSURFTRANSFORM_LIB})
+  endif()
+endif()
 
 include_directories(
   include
@@ -49,6 +75,13 @@ link_directories(
 install(
   DIRECTORY config launch lib
   DESTINATION share/${PROJECT_NAME}
+)
+
+# Install CameraSDK into runtime library path so ROS nodes can resolve it
+# without requiring a custom LD_LIBRARY_PATH to share/${PROJECT_NAME}/lib.
+install(
+  FILES lib/libCameraSDK.so
+  DESTINATION lib
 )
 
 add_executable(${PROJECT_NAME} src/main.cpp)
@@ -116,6 +149,23 @@ install(TARGETS insta360_ros_driver_decoded_equirectangular_v4l2ffmpeg
 )
 
 if(BUILD_GSTREAMER_COMBINED_NODE AND GSTREAMER_FOUND)
+  add_executable(insta360_ros_driver_decoded_gst src/main_decoded_gst.cpp)
+  ament_target_dependencies(insta360_ros_driver_decoded_gst
+    rclcpp
+    camera_info_manager
+    cv_bridge
+    image_transport
+    std_msgs
+    std_srvs
+    OpenCV
+  )
+  target_include_directories(insta360_ros_driver_decoded_gst PRIVATE ${GSTREAMER_INCLUDE_DIRS})
+  target_link_libraries(insta360_ros_driver_decoded_gst CameraSDK ${OpenCV_LIBRARIES} ${GSTREAMER_LIBRARIES})
+
+  install(TARGETS insta360_ros_driver_decoded_gst
+    DESTINATION lib/${PROJECT_NAME}
+  )
+
   add_executable(insta360_ros_driver_decoded_equirectangular_gst src/main_decoded_equirectangular_gst.cpp)
   ament_target_dependencies(insta360_ros_driver_decoded_equirectangular_gst
     rclcpp
@@ -137,8 +187,52 @@ elseif(BUILD_GSTREAMER_COMBINED_NODE)
 endif()
 
 if(BUILD_JETSON_MMAPI_COMBINED_NODE)
-  if(JETSON_MMAPI_INCLUDE_DIR AND JETSON_NVBUF_UTILS_LIB AND JETSON_V4L2_LIB)
-    add_executable(insta360_ros_driver_decoded_equirectangular_mmapi src/main_decoded_equirectangular_mmapi.cpp)
+  if(JETSON_MMAPI_INCLUDE_DIR AND JETSON_MMAPI_CLASSES_DIR AND JETSON_V4L2_LIB AND JETSON_MMAPI_BUFFER_LIBS)
+    add_executable(insta360_ros_driver_decoded_mmapi
+      src/main_decoded_mmapi.cpp
+      ${JETSON_MMAPI_CLASSES_DIR}/NvVideoDecoder.cpp
+      ${JETSON_MMAPI_CLASSES_DIR}/NvV4l2Element.cpp
+      ${JETSON_MMAPI_CLASSES_DIR}/NvV4l2ElementPlane.cpp
+      ${JETSON_MMAPI_CLASSES_DIR}/NvBuffer.cpp
+      ${JETSON_MMAPI_CLASSES_DIR}/NvElement.cpp
+      ${JETSON_MMAPI_CLASSES_DIR}/NvElementProfiler.cpp
+      ${JETSON_MMAPI_CLASSES_DIR}/NvLogging.cpp
+    )
+    ament_target_dependencies(insta360_ros_driver_decoded_mmapi
+      rclcpp
+      camera_info_manager
+      cv_bridge
+      image_transport
+      std_msgs
+      std_srvs
+      OpenCV
+    )
+    target_include_directories(insta360_ros_driver_decoded_mmapi PRIVATE
+      ${JETSON_MMAPI_INCLUDE_DIR}
+      ${JETSON_MMAPI_CLASSES_DIR}
+    )
+    target_link_libraries(insta360_ros_driver_decoded_mmapi
+      CameraSDK
+      ${OpenCV_LIBRARIES}
+      ${JETSON_MMAPI_BUFFER_LIBS}
+      ${JETSON_V4L2_LIB}
+      pthread
+    )
+
+    install(TARGETS insta360_ros_driver_decoded_mmapi
+      DESTINATION lib/${PROJECT_NAME}
+    )
+
+    add_executable(insta360_ros_driver_decoded_equirectangular_mmapi
+      src/main_decoded_equirectangular_mmapi.cpp
+      ${JETSON_MMAPI_CLASSES_DIR}/NvVideoDecoder.cpp
+      ${JETSON_MMAPI_CLASSES_DIR}/NvV4l2Element.cpp
+      ${JETSON_MMAPI_CLASSES_DIR}/NvV4l2ElementPlane.cpp
+      ${JETSON_MMAPI_CLASSES_DIR}/NvBuffer.cpp
+      ${JETSON_MMAPI_CLASSES_DIR}/NvElement.cpp
+      ${JETSON_MMAPI_CLASSES_DIR}/NvElementProfiler.cpp
+      ${JETSON_MMAPI_CLASSES_DIR}/NvLogging.cpp
+    )
     ament_target_dependencies(insta360_ros_driver_decoded_equirectangular_mmapi
       rclcpp
       camera_info_manager
@@ -148,11 +242,14 @@ if(BUILD_JETSON_MMAPI_COMBINED_NODE)
       std_srvs
       OpenCV
     )
-    target_include_directories(insta360_ros_driver_decoded_equirectangular_mmapi PRIVATE ${JETSON_MMAPI_INCLUDE_DIR})
+    target_include_directories(insta360_ros_driver_decoded_equirectangular_mmapi PRIVATE
+      ${JETSON_MMAPI_INCLUDE_DIR}
+      ${JETSON_MMAPI_CLASSES_DIR}
+    )
     target_link_libraries(insta360_ros_driver_decoded_equirectangular_mmapi
       CameraSDK
       ${OpenCV_LIBRARIES}
-      ${JETSON_NVBUF_UTILS_LIB}
+      ${JETSON_MMAPI_BUFFER_LIBS}
       ${JETSON_V4L2_LIB}
       pthread
     )
@@ -161,7 +258,7 @@ if(BUILD_JETSON_MMAPI_COMBINED_NODE)
       DESTINATION lib/${PROJECT_NAME}
     )
   else()
-    message(WARNING "Jetson Multimedia API headers/libs not found. Skipping insta360_ros_driver_decoded_equirectangular_mmapi target.")
+    message(WARNING "Jetson Multimedia API headers/libs not found. Skipping insta360_ros_driver_decoded_equirectangular_mmapi target. Expected: NvVideoDecoder.h, MMAPI classes directory, libv4l2, and libnvbufsurface (JetPack 6.x).")
   endif()
 endif()
 

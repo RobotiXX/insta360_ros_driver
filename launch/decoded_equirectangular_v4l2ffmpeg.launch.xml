@@ -1,5 +1,7 @@
 <?xml version="1.0"?>
 <launch>
+  <arg name="equirectangular_config" default="$(find-pkg-share insta360_ros_driver)/config/x4_calibration.yaml"/>
+
   <node
     name="equirectangular_node"
     pkg="insta360_ros_driver"
@@ -7,6 +9,6 @@
     output="screen">
     <param name="skip_frame" value="0" />
     <param name="i_frame_only" value="false" />
-    <param-file command="find insta360_ros_driver" args="config/x4_calibration.yaml" />
+    <param from="$(var equirectangular_config)" />
   </node>
 </launch>

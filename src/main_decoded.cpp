@@ -1,5 +1,7 @@
 #include <atomic>
+#include <chrono>
 #include <cmath>
+#include <cstring>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -16,7 +18,6 @@
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/image_encodings.hpp"
 #include "sensor_msgs/msg/image.hpp"
-#include "sensor_msgs/msg/imu.hpp"
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -42,24 +43,24 @@ public:
     DecodingStreamDelegate(
         rclcpp::Node* node,
         int skip_frame,
-        bool i_frame_only)
+                bool i_frame_only,
+                bool publish_nv12)
         : node_(node),
           skip_frame_(skip_frame),
-          i_frame_only_(i_frame_only)
+                    i_frame_only_(i_frame_only),
+                    publish_nv12_(publish_nv12)
     {
         image_pub_ = node_->create_publisher<sensor_msgs::msg::Image>(
             "/dual_fisheye/image",
-            rclcpp::SensorDataQoS());
-        imu_pub_ = node_->create_publisher<sensor_msgs::msg::Imu>(
-            "imu/data_raw",
             rclcpp::SensorDataQoS());
 
         init_decoder();
         RCLCPP_INFO(
             node_->get_logger(),
-            "Decoded image + IMU publishers ready (skip_frame=%d, i_frame_only=%s)",
+                        "Decoded image publisher ready (skip_frame=%d, i_frame_only=%s, publish_nv12=%s)",
             skip_frame_,
-            i_frame_only_ ? "true" : "false");
+                        i_frame_only_ ? "true" : "false",
+                        publish_nv12_ ? "true" : "false");
     }
 
     ~DecodingStreamDelegate()
@@ -115,45 +116,14 @@ public:
                 continue;
             }
 
-            if (skip_frame_ > 0 && !i_frame_only_) {
-                bool should_publish = (frame_counter_++ % (skip_frame_ + 1) == 0);
-                if (!should_publish) {
-                    continue;
-                }
-            }
-
             decode_and_publish_packet(pkt_);
+            av_packet_unref(pkt_);
         }
     }
 
     void OnGyroData(const std::vector<ins_camera::GyroData>& data) override
     {
-        for (const auto& gyro : data) {
-            auto msg = std::make_unique<sensor_msgs::msg::Imu>();
-            msg->header.stamp = node_->get_clock()->now();
-            msg->header.frame_id = "imu_frame";
-
-            msg->angular_velocity.x = gyro.gx;
-            msg->angular_velocity.y = gyro.gy;
-            msg->angular_velocity.z = gyro.gz;
-
-            msg->linear_acceleration.x = gyro.ax * 9.80665;
-            msg->linear_acceleration.y = gyro.ay * 9.80665;
-            msg->linear_acceleration.z = gyro.az * 9.80665;
-
-            msg->orientation.x = 0.0;
-            msg->orientation.y = 0.0;
-            msg->orientation.z = 0.0;
-            msg->orientation.w = 1.0;
-            msg->orientation_covariance[0] = -1.0;
-
-            for (int i = 0; i < 9; i++) {
-                msg->angular_velocity_covariance[i] = 0.0;
-                msg->linear_acceleration_covariance[i] = 0.0;
-            }
-
-            imu_pub_->publish(std::move(msg));
-        }
+        (void)data;
     }
 
     void OnExposureData(const ins_camera::ExposureData& data) override
@@ -266,51 +236,114 @@ private:
                 frame_to_publish = sw_frame_;
             }
 
-            if (!sws_ctx_ && frame_to_publish->width > 0 && frame_to_publish->height > 0) {
-                sws_ctx_ = sws_getContext(
-                    frame_to_publish->width,
-                    frame_to_publish->height,
-                    static_cast<AVPixelFormat>(frame_to_publish->format),
-                    frame_to_publish->width,
-                    frame_to_publish->height,
-                    AV_PIX_FMT_BGR24,
-                    SWS_POINT,
-                    nullptr,
-                    nullptr,
-                    nullptr);
-
-                if (!sws_ctx_) {
+            if (skip_frame_ > 0 && !i_frame_only_) {
+                const bool should_publish = (decoded_frame_counter_++ % (skip_frame_ + 1) == 0);
+                if (!should_publish) {
                     av_frame_unref(hw_frame_);
                     if (frame_to_publish == sw_frame_) {
                         av_frame_unref(sw_frame_);
                     }
-                    return;
+                    continue;
                 }
-
-                bgr_frame_.create(frame_to_publish->height, frame_to_publish->width, CV_8UC3);
             }
 
-            if (sws_ctx_ && !bgr_frame_.empty()) {
-                uint8_t* dst_data[4] = {bgr_frame_.data, nullptr, nullptr, nullptr};
-                int dst_linesize[4] = {static_cast<int>(bgr_frame_.step[0]), 0, 0, 0};
+            bool converted = false;
 
-                sws_scale(
-                    sws_ctx_,
-                    (const uint8_t* const*)frame_to_publish->data,
-                    frame_to_publish->linesize,
-                    0,
-                    frame_to_publish->height,
-                    dst_data,
-                    dst_linesize);
+            if (frame_to_publish->format == AV_PIX_FMT_NV12 && frame_to_publish->data[0] && frame_to_publish->data[1]) {
+                const int width = frame_to_publish->width;
+                const int height = frame_to_publish->height;
 
+                cv::Mat y_plane(height, width, CV_8UC1, frame_to_publish->data[0], frame_to_publish->linesize[0]);
+                cv::Mat uv_plane(height / 2, width / 2, CV_8UC2, frame_to_publish->data[1], frame_to_publish->linesize[1]);
+                cv::cvtColorTwoPlane(y_plane, uv_plane, bgr_frame_, cv::COLOR_YUV2BGR_NV12);
+                converted = !bgr_frame_.empty();
+            } else if (frame_to_publish->format == AV_PIX_FMT_BGR24 && frame_to_publish->data[0]) {
+                const int width = frame_to_publish->width;
+                const int height = frame_to_publish->height;
+                const int src_stride = frame_to_publish->linesize[0];
+                const int dst_stride = width * 3;
+
+                bgr_frame_.create(height, width, CV_8UC3);
+                if (src_stride == dst_stride) {
+                    std::memcpy(bgr_frame_.data, frame_to_publish->data[0], static_cast<size_t>(dst_stride) * static_cast<size_t>(height));
+                } else {
+                    for (int y = 0; y < height; ++y) {
+                        std::memcpy(
+                            bgr_frame_.ptr(y),
+                            frame_to_publish->data[0] + static_cast<size_t>(y) * static_cast<size_t>(src_stride),
+                            static_cast<size_t>(dst_stride));
+                    }
+                }
+                converted = true;
+            }
+
+            if (!converted) {
+                if (!sws_ctx_ && frame_to_publish->width > 0 && frame_to_publish->height > 0) {
+                    sws_ctx_ = sws_getContext(
+                        frame_to_publish->width,
+                        frame_to_publish->height,
+                        static_cast<AVPixelFormat>(frame_to_publish->format),
+                        frame_to_publish->width,
+                        frame_to_publish->height,
+                        AV_PIX_FMT_BGR24,
+                        SWS_FAST_BILINEAR,
+                        nullptr,
+                        nullptr,
+                        nullptr);
+
+                    if (!sws_ctx_) {
+                        av_frame_unref(hw_frame_);
+                        if (frame_to_publish == sw_frame_) {
+                            av_frame_unref(sw_frame_);
+                        }
+                        return;
+                    }
+
+                    bgr_frame_.create(frame_to_publish->height, frame_to_publish->width, CV_8UC3);
+                }
+
+                if (sws_ctx_ && !bgr_frame_.empty()) {
+                    uint8_t* dst_data[4] = {bgr_frame_.data, nullptr, nullptr, nullptr};
+                    int dst_linesize[4] = {static_cast<int>(bgr_frame_.step[0]), 0, 0, 0};
+
+                    sws_scale(
+                        sws_ctx_,
+                        (const uint8_t* const*)frame_to_publish->data,
+                        frame_to_publish->linesize,
+                        0,
+                        frame_to_publish->height,
+                        dst_data,
+                        dst_linesize);
+                    converted = true;
+                }
+            }
+
+            if (converted && !bgr_frame_.empty()) {
+                auto t0 = std::chrono::steady_clock::now();
                 std_msgs::msg::Header header;
                 header.stamp = node_->get_clock()->now();
                 header.frame_id = "camera_frame";
 
                 cv_bridge::CvImage cv_image(header, sensor_msgs::image_encodings::BGR8, bgr_frame_);
-                auto img_msg = cv_image.toImageMsg();
-                image_pub_->publish(*img_msg);
+                auto img_msg = std::make_unique<sensor_msgs::msg::Image>();
+                cv_image.toImageMsg(*img_msg);
+                image_pub_->publish(std::move(img_msg));
+                auto t1 = std::chrono::steady_clock::now();
+                publish_time_us_acc_ += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count());
+                ++published_frame_counter_;
             }
+
+            if (publish_nv12_ && frame_to_publish->format == AV_PIX_FMT_NV12 &&
+                frame_to_publish->data[0] && frame_to_publish->data[1]) {
+                auto t0 = std::chrono::steady_clock::now();
+                publish_nv12_frame(frame_to_publish);
+                auto t1 = std::chrono::steady_clock::now();
+                publish_time_us_acc_ += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count());
+                ++published_frame_counter_;
+            }
+
+            ++decoded_frame_total_counter_;
+            maybe_log_performance();
 
             av_frame_unref(hw_frame_);
             if (frame_to_publish == sw_frame_) {
@@ -355,9 +388,73 @@ private:
         codec_ = nullptr;
     }
 
+    void publish_nv12_frame(const AVFrame* frame)
+    {
+        const int width = frame->width;
+        const int height = frame->height;
+        const int y_size = width * height;
+        const int uv_size = width * height / 2;
+
+        auto msg = std::make_unique<sensor_msgs::msg::Image>();
+        msg->header.stamp = node_->get_clock()->now();
+        msg->header.frame_id = "camera_frame";
+        msg->height = static_cast<uint32_t>(height * 3 / 2);
+        msg->width = static_cast<uint32_t>(width);
+        msg->encoding = "nv12";
+        msg->is_bigendian = false;
+        msg->step = static_cast<uint32_t>(width);
+        msg->data.resize(static_cast<size_t>(y_size + uv_size));
+
+        uint8_t* dst = msg->data.data();
+        for (int y = 0; y < height; ++y) {
+            std::memcpy(
+                dst + static_cast<size_t>(y) * static_cast<size_t>(width),
+                frame->data[0] + static_cast<size_t>(y) * static_cast<size_t>(frame->linesize[0]),
+                static_cast<size_t>(width));
+        }
+
+        uint8_t* dst_uv = dst + y_size;
+        for (int y = 0; y < height / 2; ++y) {
+            std::memcpy(
+                dst_uv + static_cast<size_t>(y) * static_cast<size_t>(width),
+                frame->data[1] + static_cast<size_t>(y) * static_cast<size_t>(frame->linesize[1]),
+                static_cast<size_t>(width));
+        }
+
+        image_pub_->publish(std::move(msg));
+    }
+
+    void maybe_log_performance()
+    {
+        const auto now = std::chrono::steady_clock::now();
+        const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - perf_window_start_).count();
+        if (elapsed_ms < 2000) {
+            return;
+        }
+
+        const double sec = static_cast<double>(elapsed_ms) / 1000.0;
+        const double decoded_fps = sec > 0.0 ? static_cast<double>(decoded_frame_total_counter_) / sec : 0.0;
+        const double published_fps = sec > 0.0 ? static_cast<double>(published_frame_counter_) / sec : 0.0;
+        const double avg_publish_ms = published_frame_counter_ > 0
+            ? static_cast<double>(publish_time_us_acc_) / static_cast<double>(published_frame_counter_) / 1000.0
+            : 0.0;
+
+        RCLCPP_INFO(
+            node_->get_logger(),
+            "Decode stats: decoded=%.1f fps, published=%.1f fps, avg_publish=%.2f ms, mode=%s",
+            decoded_fps,
+            published_fps,
+            avg_publish_ms,
+            publish_nv12_ ? "nv12" : "bgr8");
+
+        decoded_frame_total_counter_ = 0;
+        published_frame_counter_ = 0;
+        publish_time_us_acc_ = 0;
+        perf_window_start_ = now;
+    }
+
     rclcpp::Node* node_;
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr image_pub_;
-    rclcpp::Publisher<sensor_msgs::msg::Imu>::SharedPtr imu_pub_;
 
     AVCodec* codec_ = nullptr;
     AVCodecContext* codec_ctx_ = nullptr;
@@ -372,9 +469,15 @@ private:
     cv::Mat bgr_frame_;
 
     int skip_frame_ = 0;
-    int frame_counter_ = 0;
+    uint64_t decoded_frame_counter_ = 0;
     bool i_frame_only_ = false;
+    bool publish_nv12_ = false;
     bool decoder_ready_ = false;
+
+    uint64_t decoded_frame_total_counter_ = 0;
+    uint64_t published_frame_counter_ = 0;
+    uint64_t publish_time_us_acc_ = 0;
+    std::chrono::steady_clock::time_point perf_window_start_ = std::chrono::steady_clock::now();
 
     std::mutex decoder_mutex_;
 };
@@ -385,11 +488,15 @@ public:
     {
         declare_parameter("skip_frame", 0);
         declare_parameter("i_frame_only", false);
+        declare_parameter("enable_in_camera_stitching", false);
+        declare_parameter("publish_nv12", false);
 
         const int skip_frame = get_parameter("skip_frame").as_int();
         const bool i_frame_only = get_parameter("i_frame_only").as_bool();
+        const bool enable_in_camera_stitching = get_parameter("enable_in_camera_stitching").as_bool();
+        const bool publish_nv12 = get_parameter("publish_nv12").as_bool();
 
-        if (start_camera(skip_frame, i_frame_only) != 0) {
+        if (start_camera(skip_frame, i_frame_only, enable_in_camera_stitching, publish_nv12) != 0) {
             throw std::runtime_error("Failed to start camera stream");
         }
     }
@@ -397,12 +504,18 @@ public:
     ~CameraDecodedNode() override
     {
         if (cam_) {
+            if (live_streaming_started_) {
+                if (!cam_->StopLiveStreaming()) {
+                    RCLCPP_WARN(get_logger(), "StopLiveStreaming failed during shutdown.");
+                }
+                live_streaming_started_ = false;
+            }
             cam_->Close();
         }
     }
 
 private:
-    int start_camera(int skip_frame, bool i_frame_only)
+    int start_camera(int skip_frame, bool i_frame_only, bool enable_in_camera_stitching, bool publish_nv12)
     {
         ins_camera::DeviceDiscovery discovery;
         auto list = discovery.GetAvailableDevices();
@@ -421,19 +534,30 @@ private:
         discovery.FreeDeviceDescriptors(list);
 
         std::shared_ptr<ins_camera::StreamDelegate> delegate =
-            std::make_shared<DecodingStreamDelegate>(this, skip_frame, i_frame_only);
+            std::make_shared<DecodingStreamDelegate>(this, skip_frame, i_frame_only, publish_nv12);
         stream_delegate_ = delegate;
         cam_->SetStreamDelegate(delegate);
 
+        if (!cam_->EnableInCameraStitching(enable_in_camera_stitching)) {
+            RCLCPP_WARN(
+                get_logger(),
+                "EnableInCameraStitching(%s) failed; continuing.",
+                enable_in_camera_stitching ? "true" : "false");
+        } else {
+            RCLCPP_INFO(
+                get_logger(),
+                "EnableInCameraStitching(%s) applied.",
+                enable_in_camera_stitching ? "true" : "false");
+        }
+
         auto start = time(NULL);
         uint64_t utc_time = static_cast<uint64_t>(start);
-        uint32_t offset_time = 0;
-        cam_->SyncLocalTimeToCamera(utc_time, offset_time);
+        cam_->SyncLocalTimeToCamera(utc_time);
 
         ins_camera::LiveStreamParam param;
-        param.video_resolution = ins_camera::VideoResolution::RES_1920_960P30;
+        param.video_resolution = ins_camera::VideoResolution::RES_2560_1280P60;
         param.lrv_video_resulution = ins_camera::VideoResolution::RES_1440_720P30;
-        param.video_bitrate = 1024 * 1024 / 2;
+        param.video_bitrate = 1024 * 1024 *2;
         param.enable_audio = false;
         param.using_lrv = false;
 
@@ -442,12 +566,15 @@ private:
             return -1;
         }
 
+        live_streaming_started_ = true;
+
         RCLCPP_INFO(get_logger(), "Live streaming started with integrated decode.");
         return 0;
     }
 
     std::shared_ptr<ins_camera::Camera> cam_;
     std::shared_ptr<ins_camera::StreamDelegate> stream_delegate_;
+    bool live_streaming_started_ = false;
 };
 
 int main(int argc, char* argv[])

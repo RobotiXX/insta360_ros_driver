@@ -5,6 +5,8 @@
 #include <string>
 #include <vector>
 #include <cstring>
+#include <cerrno>
+#include <fcntl.h>
 
 #include <linux/videodev2.h>
 
@@ -39,6 +41,7 @@ public:
     void OnExposureData(const ins_camera::ExposureData& data) override;
 
 private:
+    bool isIdrFrame(const uint8_t* data, size_t size) const;
     void initDecoder();
     bool queueBitstream(const uint8_t* data, size_t size);
     void captureLoop();
@@ -57,11 +60,16 @@ private:
     bool resolution_event_seen_ = false;
     uint32_t capture_width_ = 0;
     uint32_t capture_height_ = 0;
+    uint32_t output_plane_num_buffers_ = 0;
+    uint32_t output_plane_next_index_ = 0;
+    uint32_t output_plane_queued_ = 0;
 
     int skip_frame_ = 0;
     int frame_counter_ = 0;
     bool i_frame_only_ = false;
     bool decoder_ready_ = false;
+    bool wait_for_first_idr_ = true;
+    bool resolution_event_failed_ = false;
 
     std::mutex decoder_mutex_;
 };
@@ -125,10 +133,10 @@ public:
         cam_->SetStreamDelegate(delegate);
 
         uint64_t utc_time = static_cast<uint64_t>(time(NULL));
-        cam_->SyncLocalTimeToCamera(utc_time, 0);
+        cam_->SyncLocalTimeToCamera(utc_time);
 
         ins_camera::LiveStreamParam param;
-        param.video_resolution = ins_camera::VideoResolution::RES_1920_960P30;
+        param.video_resolution = ins_camera::VideoResolution::RES_2880_1440P30;
         param.lrv_video_resulution = ins_camera::VideoResolution::RES_1440_720P30;
         param.video_bitrate = 1024 * 1024 / 2;
         param.enable_audio = false;
@@ -495,6 +503,26 @@ void DecodedEquirectStreamDelegate::OnAudioData(const uint8_t* data, size_t size
     (void)timestamp;
 }
 
+bool DecodedEquirectStreamDelegate::isIdrFrame(const uint8_t* data, size_t size) const
+{
+    for (size_t i = 0; i + 4 < size; ++i) {
+        const bool start3 = (data[i] == 0x00 && data[i + 1] == 0x00 && data[i + 2] == 0x01);
+        const bool start4 = (i + 5 < size && data[i] == 0x00 && data[i + 1] == 0x00 && data[i + 2] == 0x00 && data[i + 3] == 0x01);
+        if (!start3 && !start4) {
+            continue;
+        }
+        const size_t nal_idx = start3 ? i + 3 : i + 4;
+        if (nal_idx >= size) {
+            break;
+        }
+        const uint8_t nal_type = data[nal_idx] & 0x1f;
+        if (nal_type == 5) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void DecodedEquirectStreamDelegate::OnVideoData(
     const uint8_t* data,
     size_t size,
@@ -507,6 +535,15 @@ void DecodedEquirectStreamDelegate::OnVideoData(
 
     if (stream_index != 0 || size == 0 || !decoder_ready_) {
         return;
+    }
+
+    // MMAPI decode startup is more stable when we begin from an IDR frame.
+    if (wait_for_first_idr_) {
+        if (!isIdrFrame(data, size)) {
+            return;
+        }
+        wait_for_first_idr_ = false;
+        RCLCPP_INFO(owner_->get_logger(), "Received first IDR frame, starting MMAPI decode feed.");
     }
 
     if (skip_frame_ > 0 && !i_frame_only_) {
@@ -569,6 +606,10 @@ void DecodedEquirectStreamDelegate::initDecoder()
         return;
     }
 
+    output_plane_num_buffers_ = decoder_->output_plane.getNumBuffers();
+    output_plane_next_index_ = 0;
+    output_plane_queued_ = 0;
+
     if (decoder_->output_plane.setStreamStatus(true) < 0) {
         RCLCPP_ERROR(owner_->get_logger(), "Failed starting MMAPI output plane stream");
         cleanupDecoder();
@@ -594,8 +635,21 @@ bool DecodedEquirectStreamDelegate::queueBitstream(const uint8_t* data, size_t s
     std::memset(planes, 0, sizeof(planes));
     v4l2_buf.m.planes = planes;
 
-    if (decoder_->output_plane.dqBuffer(v4l2_buf, &buffer, nullptr, 0) < 0) {
-        return false;
+    // Before all output-plane buffers are queued once, grab a free MMAP buffer
+    // directly by index. After that, recycle buffers via dq/q.
+    if (output_plane_queued_ < output_plane_num_buffers_) {
+        v4l2_buf.index = output_plane_next_index_++;
+        if (output_plane_next_index_ >= output_plane_num_buffers_) {
+            output_plane_next_index_ = 0;
+        }
+        v4l2_buf.type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
+        v4l2_buf.memory = V4L2_MEMORY_MMAP;
+        v4l2_buf.length = MAX_PLANES;
+        buffer = decoder_->output_plane.getNthBuffer(v4l2_buf.index);
+    } else {
+        if (decoder_->output_plane.dqBuffer(v4l2_buf, &buffer, nullptr, 0) < 0) {
+            return false;
+        }
     }
 
     if (!buffer || buffer->planes[0].data == nullptr) {
@@ -606,7 +660,11 @@ bool DecodedEquirectStreamDelegate::queueBitstream(const uint8_t* data, size_t s
     std::memcpy(buffer->planes[0].data, data, bytes);
 
     v4l2_buf.m.planes[0].bytesused = static_cast<uint32_t>(bytes);
-    return decoder_->output_plane.qBuffer(v4l2_buf, nullptr) >= 0;
+    const bool queued = decoder_->output_plane.qBuffer(v4l2_buf, nullptr) >= 0;
+    if (queued && output_plane_queued_ < output_plane_num_buffers_) {
+        ++output_plane_queued_;
+    }
+    return queued;
 }
 
 bool DecodedEquirectStreamDelegate::setupCapturePlane()
@@ -693,11 +751,31 @@ void DecodedEquirectStreamDelegate::captureLoop()
     while (capture_running_.load()) {
         if (!resolution_event_seen_) {
             struct v4l2_event ev;
-            if (decoder_->dqEvent(ev, 10000) == 0 && ev.type == V4L2_EVENT_RESOLUTION_CHANGE) {
+            const int dq_ret = decoder_->dqEvent(ev, 1000);
+            if (dq_ret == 0 && ev.type == V4L2_EVENT_RESOLUTION_CHANGE) {
                 resolution_event_seen_ = true;
                 if (!setupCapturePlane()) {
                     RCLCPP_ERROR(owner_->get_logger(), "Failed setting up MMAPI capture plane after resolution event");
                     break;
+                }
+            } else if (dq_ret < 0 && errno == EINVAL) {
+                if (!resolution_event_failed_) {
+                    RCLCPP_WARN(owner_->get_logger(), "MMAPI resolution-change events not available (EINVAL). Falling back to format polling.");
+                    resolution_event_failed_ = true;
+                }
+            }
+
+            if (resolution_event_failed_) {
+                struct v4l2_format format;
+                std::memset(&format, 0, sizeof(format));
+                if (decoder_->capture_plane.getFormat(format) == 0 &&
+                    format.fmt.pix_mp.width > 0 &&
+                    format.fmt.pix_mp.height > 0) {
+                    resolution_event_seen_ = true;
+                    if (!setupCapturePlane()) {
+                        RCLCPP_ERROR(owner_->get_logger(), "Failed setting up MMAPI capture plane after format polling");
+                        break;
+                    }
                 }
             }
             continue;

@@ -32,7 +32,7 @@ public:
         GstAppSrc* appsrc,
         int skip_frame,
         bool i_frame_only);
-    ~GstDecodedEquirectStreamDelegate() override;
+    ~GstDecodedEquirectStreamDelegate();
 
     void OnAudioData(const uint8_t* data, size_t size, int64_t timestamp) override;
     void OnVideoData(const uint8_t* data, size_t size, int64_t timestamp, uint8_t streamType, int stream_index) override;
@@ -131,10 +131,10 @@ public:
         cam_->SetStreamDelegate(delegate);
 
         uint64_t utc_time = static_cast<uint64_t>(time(NULL));
-        cam_->SyncLocalTimeToCamera(utc_time, 0);
+        cam_->SyncLocalTimeToCamera(utc_time);
 
         ins_camera::LiveStreamParam param;
-        param.video_resolution = ins_camera::VideoResolution::RES_1920_960P30;
+        param.video_resolution = ins_camera::VideoResolution::RES_2880_1440P30;
         param.lrv_video_resulution = ins_camera::VideoResolution::RES_1440_720P30;
         param.video_bitrate = 1024 * 1024 / 2;
         param.enable_audio = false;

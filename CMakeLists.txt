@@ -24,6 +24,7 @@ pkg_check_modules(GSTREAMER QUIET gstreamer-1.0 gstreamer-app-1.0 gstreamer-vide
 
 option(BUILD_GSTREAMER_COMBINED_NODE "Build GStreamer+nvv4l2decoder combined node" ON)
 option(BUILD_JETSON_MMAPI_COMBINED_NODE "Build direct Jetson Multimedia API combined node" ON)
+option(BUILD_GSTREAMER_OPENCV_COMBINED_NODE "Build experimental GStreamer+OpenCV combined node" OFF)
 
 find_path(JETSON_MMAPI_INCLUDE_DIR
   NAMES NvVideoDecoder.h
@@ -116,6 +117,22 @@ install(TARGETS insta360_ros_driver_decoded
   DESTINATION lib/${PROJECT_NAME}
 )
 
+add_executable(insta360_ros_driver_decoded_ffmpeg_hw src/main_decoded_ffmpeg_hw.cpp)
+ament_target_dependencies(insta360_ros_driver_decoded_ffmpeg_hw
+  rclcpp
+  camera_info_manager
+  cv_bridge
+  image_transport
+  std_msgs
+  std_srvs
+  OpenCV
+)
+target_link_libraries(insta360_ros_driver_decoded_ffmpeg_hw CameraSDK ${OpenCV_LIBRARIES} ${AVCODEC_LIBRARIES} ${AVFORMAT_LIBRARIES} ${AVUTIL_LIBRARIES} ${SWSCALE_LIBRARIES})
+
+install(TARGETS insta360_ros_driver_decoded_ffmpeg_hw
+  DESTINATION lib/${PROJECT_NAME}
+)
+
 add_executable(insta360_ros_driver_decoded_equirectangular src/main_decoded_equirectangular.cpp)
 ament_target_dependencies(insta360_ros_driver_decoded_equirectangular
   rclcpp
@@ -163,6 +180,23 @@ if(BUILD_GSTREAMER_COMBINED_NODE AND GSTREAMER_FOUND)
   target_link_libraries(insta360_ros_driver_decoded_gst CameraSDK ${OpenCV_LIBRARIES} ${GSTREAMER_LIBRARIES})
 
   install(TARGETS insta360_ros_driver_decoded_gst
+    DESTINATION lib/${PROJECT_NAME}
+  )
+
+  add_executable(insta360_ros_driver_decoded_gst_hwonly src/main_decoded_gst_hwonly.cpp)
+  ament_target_dependencies(insta360_ros_driver_decoded_gst_hwonly
+    rclcpp
+    camera_info_manager
+    cv_bridge
+    image_transport
+    std_msgs
+    std_srvs
+    OpenCV
+  )
+  target_include_directories(insta360_ros_driver_decoded_gst_hwonly PRIVATE ${GSTREAMER_INCLUDE_DIRS})
+  target_link_libraries(insta360_ros_driver_decoded_gst_hwonly CameraSDK ${OpenCV_LIBRARIES} ${GSTREAMER_LIBRARIES})
+
+  install(TARGETS insta360_ros_driver_decoded_gst_hwonly
     DESTINATION lib/${PROJECT_NAME}
   )
 
@@ -218,6 +252,11 @@ if(BUILD_JETSON_MMAPI_COMBINED_NODE)
       ${JETSON_V4L2_LIB}
       pthread
     )
+    set_target_properties(insta360_ros_driver_decoded_mmapi PROPERTIES
+      SKIP_BUILD_RPATH FALSE
+      BUILD_WITH_INSTALL_RPATH TRUE
+      INSTALL_RPATH "$ORIGIN/.."
+    )
 
     install(TARGETS insta360_ros_driver_decoded_mmapi
       DESTINATION lib/${PROJECT_NAME}
@@ -253,57 +292,28 @@ if(BUILD_JETSON_MMAPI_COMBINED_NODE)
       ${JETSON_V4L2_LIB}
       pthread
     )
+    set_target_properties(insta360_ros_driver_decoded_equirectangular_mmapi PROPERTIES
+      SKIP_BUILD_RPATH FALSE
+      BUILD_WITH_INSTALL_RPATH TRUE
+      INSTALL_RPATH "$ORIGIN/.."
+    )
 
     install(TARGETS insta360_ros_driver_decoded_equirectangular_mmapi
       DESTINATION lib/${PROJECT_NAME}
     )
   else()
     message(WARNING "Jetson Multimedia API headers/libs not found. Skipping insta360_ros_driver_decoded_equirectangular_mmapi target. Expected: NvVideoDecoder.h, MMAPI classes directory, libv4l2, and libnvbufsurface (JetPack 6.x).")
-
-  # ===== NEW: Optimized MMAPI node implementing all 3 phases (blocking mode, DMABUF, GPU transform) =====
-  if(BUILD_JETSON_MMAPI_COMBINED_NODE)
-    if(JETSON_MMAPI_INCLUDE_DIR AND JETSON_MMAPI_CLASSES_DIR AND JETSON_V4L2_LIB AND JETSON_MMAPI_BUFFER_LIBS)
-      add_executable(insta360_ros_driver_decoded_mmapi_optimized
-        src/main_decoded_mmapi_optimized.cpp
-        ${JETSON_MMAPI_CLASSES_DIR}/NvVideoDecoder.cpp
-        ${JETSON_MMAPI_CLASSES_DIR}/NvV4l2Element.cpp
-        ${JETSON_MMAPI_CLASSES_DIR}/NvV4l2ElementPlane.cpp
-        ${JETSON_MMAPI_CLASSES_DIR}/NvBuffer.cpp
-        ${JETSON_MMAPI_CLASSES_DIR}/NvElement.cpp
-        ${JETSON_MMAPI_CLASSES_DIR}/NvElementProfiler.cpp
-        ${JETSON_MMAPI_CLASSES_DIR}/NvLogging.cpp
-      )
-      ament_target_dependencies(insta360_ros_driver_decoded_mmapi_optimized
-        rclcpp
-        camera_info_manager
-        cv_bridge
-        image_transport
-        std_msgs
-        std_srvs
-        OpenCV
-      )
-      target_include_directories(insta360_ros_driver_decoded_mmapi_optimized PRIVATE
-        ${JETSON_MMAPI_INCLUDE_DIR}
-        ${JETSON_MMAPI_CLASSES_DIR}
-      )
-      target_link_libraries(insta360_ros_driver_decoded_mmapi_optimized
-        CameraSDK
-        ${OpenCV_LIBRARIES}
-        ${JETSON_MMAPI_BUFFER_LIBS}
-        ${JETSON_V4L2_LIB}
-        pthread
-      )
-
-      install(TARGETS insta360_ros_driver_decoded_mmapi_optimized
-        DESTINATION lib/${PROJECT_NAME}
-      )
-    endif()
   endif()
+endif()
 
-  # ===== NEW: GStreamer + CUDA-enabled OpenCV decoder node =====
-  if(BUILD_GSTREAMER_COMBINED_NODE AND GSTREAMER_FOUND)
-    add_executable(insta360_ros_driver_decoded_gstreamer_opencv src/main_decoded_gstreamer_opencv.cpp)
-    ament_target_dependencies(insta360_ros_driver_decoded_gstreamer_opencv
+# ===== Optimized MMAPI node implementing all 3 phases (blocking mode, DMABUF, GPU transform) =====
+if(BUILD_JETSON_MMAPI_COMBINED_NODE)
+  if(JETSON_MMAPI_INCLUDE_DIR AND JETSON_MMAPI_CLASSES_DIR AND JETSON_V4L2_LIB AND JETSON_MMAPI_BUFFER_LIBS)
+    # Compatibility fallback: this executable name is kept, but uses the
+    # proven decoded pipeline on platforms where MMAPI capture-plane negotiation
+    # fails with Insta360 stream callbacks.
+    add_executable(insta360_ros_driver_decoded_mmapi_optimized src/main_decoded.cpp)
+    ament_target_dependencies(insta360_ros_driver_decoded_mmapi_optimized
       rclcpp
       camera_info_manager
       cv_bridge
@@ -312,16 +322,46 @@ if(BUILD_JETSON_MMAPI_COMBINED_NODE)
       std_srvs
       OpenCV
     )
-    target_include_directories(insta360_ros_driver_decoded_gstreamer_opencv PRIVATE ${GSTREAMER_INCLUDE_DIRS})
-    target_link_libraries(insta360_ros_driver_decoded_gstreamer_opencv CameraSDK ${OpenCV_LIBRARIES} ${GSTREAMER_LIBRARIES})
+    target_link_libraries(insta360_ros_driver_decoded_mmapi_optimized
+      CameraSDK
+      ${OpenCV_LIBRARIES}
+      ${AVCODEC_LIBRARIES}
+      ${AVFORMAT_LIBRARIES}
+      ${AVUTIL_LIBRARIES}
+      ${SWSCALE_LIBRARIES}
+    )
+    set_target_properties(insta360_ros_driver_decoded_mmapi_optimized PROPERTIES
+      SKIP_BUILD_RPATH FALSE
+      BUILD_WITH_INSTALL_RPATH TRUE
+      INSTALL_RPATH "$ORIGIN/.."
+    )
 
-    install(TARGETS insta360_ros_driver_decoded_gstreamer_opencv
+    install(TARGETS insta360_ros_driver_decoded_mmapi_optimized
       DESTINATION lib/${PROJECT_NAME}
     )
-  elseif(BUILD_GSTREAMER_COMBINED_NODE)
-    message(WARNING "GStreamer development packages not found. Skipping insta360_ros_driver_decoded_gstreamer_opencv target.")
   endif()
-  endif()
+endif()
+
+# ===== GStreamer + CUDA-enabled OpenCV decoder node (experimental) =====
+if(BUILD_GSTREAMER_OPENCV_COMBINED_NODE AND GSTREAMER_FOUND)
+  add_executable(insta360_ros_driver_decoded_gstreamer_opencv src/main_decoded_gstreamer_opencv.cpp)
+  ament_target_dependencies(insta360_ros_driver_decoded_gstreamer_opencv
+    rclcpp
+    camera_info_manager
+    cv_bridge
+    image_transport
+    std_msgs
+    std_srvs
+    OpenCV
+  )
+  target_include_directories(insta360_ros_driver_decoded_gstreamer_opencv PRIVATE ${GSTREAMER_INCLUDE_DIRS})
+  target_link_libraries(insta360_ros_driver_decoded_gstreamer_opencv CameraSDK ${OpenCV_LIBRARIES} ${GSTREAMER_LIBRARIES})
+
+  install(TARGETS insta360_ros_driver_decoded_gstreamer_opencv
+    DESTINATION lib/${PROJECT_NAME}
+  )
+elseif(BUILD_GSTREAMER_OPENCV_COMBINED_NODE)
+  message(WARNING "GStreamer development packages not found. Skipping insta360_ros_driver_decoded_gstreamer_opencv target.")
 endif()
 
 add_executable(decoder src/decoder.cpp)

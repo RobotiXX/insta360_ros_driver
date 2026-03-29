@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cerrno>
 #include <cstdint>
 #include <cstring>
@@ -80,7 +81,7 @@ private:
 
     // ===== Capture Loop Thread =====
     void captureLoop();
-    bool setupCapturePlane();
+    bool setupCapturePlane(uint32_t forced_width = 0, uint32_t forced_height = 0, uint32_t forced_pixfmt = 0);
     bool processCapturedFrame(NvBuffer* buffer);
 
     MmapiDecodedOptimizedNode* owner_;
@@ -101,6 +102,7 @@ private:
     // ===== Resolution Information =====
     uint32_t capture_width_ = 0;
     uint32_t capture_height_ = 0;
+    enum v4l2_memory capture_memory_type_ = V4L2_MEMORY_DMABUF;
     
     // ===== Output Plane Buffer Management (Phase 1: Only 2 buffers in blocking mode) =====
     uint32_t output_plane_num_buffers_ = OUTPUT_PLANE_BUFFERS_BLOCKING;
@@ -149,6 +151,17 @@ public:
 
     ~MmapiDecodedOptimizedNode() override
     {
+        // Stop camera streaming first so decoder input is drained and callbacks stop.
+        if (cam_ && live_streaming_started_) {
+            if (!cam_->StopLiveStreaming()) {
+                RCLCPP_WARN(get_logger(), "StopLiveStreaming failed during shutdown");
+            }
+            live_streaming_started_ = false;
+        }
+
+        // Destroy delegate before closing camera so decoder thread is joined first.
+        stream_delegate_.reset();
+
         if (cam_) {
             cam_->Close();
         }
@@ -203,6 +216,8 @@ public:
             RCLCPP_ERROR(get_logger(), "Failed to start live streaming.");
             return false;
         }
+
+        live_streaming_started_ = true;
 
         RCLCPP_INFO(get_logger(), "Started optimized Jetson MMAPI decode node (Phases 1-3)");
         return true;
@@ -281,6 +296,7 @@ private:
     int skip_frame_ = 0;
     bool i_frame_only_ = false;
     int64_t video_bitrate_ = 1024 * 1024;  // Phase 1: Default 1 MB/s
+    bool live_streaming_started_ = false;
 
     friend class MmapiDecodedOptimizedStreamDelegate;
 };
@@ -377,26 +393,9 @@ void MmapiDecodedOptimizedStreamDelegate::OnVideoData(
         return;
     }
 
-    // ===== WAIT FOR FIRST IDR (KEYFRAME) TO BEGIN DECODING =====
-    if (wait_for_first_idr_) {
-        if (!isIdrFrame(data, size)) {
-            return;
-        }
-        wait_for_first_idr_ = false;
-        RCLCPP_INFO(owner_->get_logger(), "Received first IDR frame, starting MMAPI decode feed.");
-    }
-
     // ===== FILTER: I-FRAME ONLY MODE =====
     if (i_frame_only_ && !isIdrFrame(data, size)) {
         return;
-    }
-
-    // ===== FILTER: FRAME SKIPPING (e.g., skip_frame=2 = decode every 3rd frame) =====
-    if (skip_frame_ > 0 && !i_frame_only_) {
-        const bool should_publish = (frame_counter_++ % (skip_frame_ + 1) == 0);
-        if (!should_publish) {
-            return;
-        }
     }
 
     // ===== QUEUE BITSTREAM TO MMAPI OUTPUT PLANE =====
@@ -561,50 +560,89 @@ bool MmapiDecodedOptimizedStreamDelegate::queueBitstream(const uint8_t* data, si
  * Queries decoder for resolution, allocates min_buffers + EXTRA_CAPTURE_BUFFERS,
  * and pre-queues all buffers for immediate dequeue of decoded frames.
  */
-bool MmapiDecodedOptimizedStreamDelegate::setupCapturePlane()
+bool MmapiDecodedOptimizedStreamDelegate::setupCapturePlane(uint32_t forced_width, uint32_t forced_height, uint32_t forced_pixfmt)
 {
-    // ===== QUERY DECODER FOR OUTPUT RESOLUTION =====
-    struct v4l2_format format;
-    std::memset(&format, 0, sizeof(format));
+    uint32_t capture_pixfmt = 0;
+    if (forced_width > 0 && forced_height > 0) {
+        capture_width_ = forced_width;
+        capture_height_ = forced_height;
+        capture_pixfmt = (forced_pixfmt != 0) ? forced_pixfmt : V4L2_PIX_FMT_NV12;
+        RCLCPP_WARN(owner_->get_logger(),
+            "Using forced capture plane setup: %ux%u pixfmt=0x%x",
+            capture_width_, capture_height_, capture_pixfmt);
+    } else {
+        // ===== QUERY DECODER FOR OUTPUT RESOLUTION =====
+        struct v4l2_format format;
+        std::memset(&format, 0, sizeof(format));
 
-    if (decoder_->capture_plane.getFormat(format) < 0) {
-        RCLCPP_ERROR(owner_->get_logger(), "Failed to get capture plane format");
-        return false;
+        if (decoder_->capture_plane.getFormat(format) < 0) {
+            RCLCPP_ERROR(owner_->get_logger(), "Failed to get capture plane format");
+            return false;
+        }
+
+        // ===== EXTRACT RESOLUTION FROM DECODER =====
+        capture_width_ = format.fmt.pix_mp.width;
+        capture_height_ = format.fmt.pix_mp.height;
+        capture_pixfmt = format.fmt.pix_mp.pixelformat;
+
+        RCLCPP_INFO(owner_->get_logger(), "Decoder output resolution: %ux%u", capture_width_, capture_height_);
     }
 
-    // ===== EXTRACT RESOLUTION FROM DECODER =====
-    capture_width_ = format.fmt.pix_mp.width;
-    capture_height_ = format.fmt.pix_mp.height;
-
-    RCLCPP_INFO(owner_->get_logger(), "Decoder output resolution: %ux%u", capture_width_, capture_height_);
-
     // ===== SET CAPTURE PLANE FORMAT ON DECODER =====
-    if (decoder_->setCapturePlaneFormat(
-            format.fmt.pix_mp.pixelformat,
-            format.fmt.pix_mp.width,
-            format.fmt.pix_mp.height) < 0) {
+    if (decoder_->setCapturePlaneFormat(capture_pixfmt, capture_width_, capture_height_) < 0) {
         RCLCPP_ERROR(owner_->get_logger(), "Failed to set capture plane format");
         return false;
     }
 
     // ===== QUERY MINIMUM CAPTURE PLANE BUFFERS =====
     int min_cap_buffers = 0;
+    bool got_min_capture_buffers = true;
     if (decoder_->getMinimumCapturePlaneBuffers(min_cap_buffers) < 0) {
-        RCLCPP_ERROR(owner_->get_logger(), "Failed to get minimum capture plane buffers");
-        return false;
+        // Some decoder paths don't expose this control until a full resolution-change
+        // handshake succeeds. Fall back to a conservative fixed minimum.
+        got_min_capture_buffers = false;
+        min_cap_buffers = 4;
+        RCLCPP_WARN(owner_->get_logger(),
+            "Failed to query minimum capture plane buffers; using fallback min=%d",
+            min_cap_buffers);
     }
 
     // ===== PHASE 2: USE DMABUF FOR GPU-INTEGRATED BUFFERS =====
     // DMABUF keeps frames in GPU memory, eliminates CPU→GPU copies
-    int total_buffers = min_cap_buffers + EXTRA_CAPTURE_BUFFERS;
+    int total_buffers = got_min_capture_buffers ? (min_cap_buffers + EXTRA_CAPTURE_BUFFERS) : 6;
 
-    if (decoder_->capture_plane.setupPlane(V4L2_MEMORY_DMABUF, total_buffers, true, false) < 0) {
-        RCLCPP_ERROR(owner_->get_logger(), "Failed setting up MMAPI capture plane with DMABUF");
-        return false;
+    auto try_setup_capture_plane = [&](enum v4l2_memory mem_type, int buffers) -> bool {
+        const bool map_buffers = (mem_type == V4L2_MEMORY_MMAP);
+        return decoder_->capture_plane.setupPlane(mem_type, static_cast<uint32_t>(buffers), map_buffers, false) == 0;
+    };
+
+    // Prefer DMABUF, but fall back to MMAP on platforms/drivers that reject DMABUF REQBUFS.
+    capture_memory_type_ = V4L2_MEMORY_DMABUF;
+    if (!try_setup_capture_plane(capture_memory_type_, total_buffers)) {
+        RCLCPP_WARN(owner_->get_logger(),
+            "Capture plane DMABUF setup failed, retrying with MMAP");
+
+        // Ensure the plane is reset before switching memory model.
+        decoder_->capture_plane.deinitPlane();
+
+        capture_memory_type_ = V4L2_MEMORY_MMAP;
+        if (!try_setup_capture_plane(capture_memory_type_, total_buffers)) {
+            // Final fallback: try a smaller MMAP request count.
+            decoder_->capture_plane.deinitPlane();
+            total_buffers = 4;
+            if (!try_setup_capture_plane(capture_memory_type_, total_buffers)) {
+                RCLCPP_ERROR(owner_->get_logger(), "Failed setting up MMAPI capture plane with both DMABUF and MMAP");
+                return false;
+            }
+        }
     }
 
-    RCLCPP_INFO(owner_->get_logger(), "Capture plane: %d buffers (min=%d + extra=%d)",
-        total_buffers, min_cap_buffers, EXTRA_CAPTURE_BUFFERS);
+    RCLCPP_INFO(owner_->get_logger(),
+        "Capture plane: %d buffers (min=%d + extra=%d), memory=%s",
+        total_buffers,
+        min_cap_buffers,
+        EXTRA_CAPTURE_BUFFERS,
+        capture_memory_type_ == V4L2_MEMORY_DMABUF ? "DMABUF" : "MMAP");
 
     // ===== ENABLE CAPTURE PLANE STREAMING =====
     if (decoder_->capture_plane.setStreamStatus(true) < 0) {
@@ -622,7 +660,7 @@ bool MmapiDecodedOptimizedStreamDelegate::setupCapturePlane()
         v4l2_buf.index = i;
         v4l2_buf.m.planes = planes;
         v4l2_buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
-        v4l2_buf.memory = V4L2_MEMORY_DMABUF;  // PHASE 2: DMABUF memory
+        v4l2_buf.memory = capture_memory_type_;
         if (decoder_->capture_plane.qBuffer(v4l2_buf, nullptr) < 0) {
             RCLCPP_ERROR(owner_->get_logger(), "Failed to queue capture plane buffer %u", i);
             return false;
@@ -651,6 +689,15 @@ bool MmapiDecodedOptimizedStreamDelegate::processCapturedFrame(NvBuffer* buffer)
 
     if (buffer->n_planes < 2 || !buffer->planes[0].data || !buffer->planes[1].data) {
         return false;
+    }
+
+    // Apply skip policy after successful decode so we never starve the decoder
+    // of reference/config NAL units on the input side.
+    if (skip_frame_ > 0 && !i_frame_only_) {
+        const bool should_publish = (frame_counter_++ % (skip_frame_ + 1) == 0);
+        if (!should_publish) {
+            return true;
+        }
     }
 
     // ===== PHASE 3: GPU COLOR SPACE CONVERSION =====
@@ -698,24 +745,57 @@ void MmapiDecodedOptimizedStreamDelegate::captureLoop()
         struct v4l2_event ev;
         // ===== BLOCKING WAIT: 50-second timeout for startup (should happen within 1-2 frames) =====
         int dq_ret = decoder_->dqEvent(ev, 50000);
-        if (dq_ret != 0 || ev.type != V4L2_EVENT_RESOLUTION_CHANGE) {
-            RCLCPP_ERROR(owner_->get_logger(), 
-                "No resolution change event received; decoder unable to determine frame dimensions");
-            capture_running_.store(false);
-            return;
-        }
+        if (dq_ret == 0 && ev.type == V4L2_EVENT_RESOLUTION_CHANGE) {
+            resolution_event_seen_ = true;
+            if (!setupCapturePlane()) {
+                RCLCPP_ERROR(owner_->get_logger(), "Failed setting up MMAPI capture plane after resolution event");
+                capture_running_.store(false);
+                return;
+            }
+        } else {
+            if (dq_ret < 0 && errno == EINVAL) {
+                RCLCPP_WARN(owner_->get_logger(),
+                    "Resolution-change events unsupported (EINVAL). Falling back to format polling.");
+            } else {
+                RCLCPP_WARN(owner_->get_logger(),
+                    "No valid resolution-change event received (ret=%d, type=%u). Falling back.",
+                    dq_ret, dq_ret == 0 ? ev.type : 0u);
+            }
 
-        resolution_event_seen_ = true;
-        if (!setupCapturePlane()) {
-            RCLCPP_ERROR(owner_->get_logger(), "Failed setting up MMAPI capture plane after resolution event");
-            capture_running_.store(false);
-            return;
+            // Poll decoder capture format for a short period.
+            for (int i = 0; i < 100; ++i) {
+                struct v4l2_format format;
+                std::memset(&format, 0, sizeof(format));
+                if (decoder_->capture_plane.getFormat(format) == 0 &&
+                    format.fmt.pix_mp.width > 0 &&
+                    format.fmt.pix_mp.height > 0) {
+                    resolution_event_seen_ = true;
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+
+            if (resolution_event_seen_) {
+                if (!setupCapturePlane()) {
+                    RCLCPP_ERROR(owner_->get_logger(), "Failed setting up MMAPI capture plane after format polling");
+                    capture_running_.store(false);
+                    return;
+                }
+            } else {
+                // User confirmed stream resolution is fixed to 2880x1440.
+                if (!setupCapturePlane(2880, 1440, V4L2_PIX_FMT_NV12M)) {
+                    RCLCPP_ERROR(owner_->get_logger(),
+                        "Failed fixed-resolution fallback setup (2880x1440 NV12M)");
+                    capture_running_.store(false);
+                    return;
+                }
+            }
         }
     }
 
     // ===== PHASE 1: MAIN CAPTURE LOOP - BLOCKING MODE =====
     // dqBuffer(-1) blocks forever until frame available (no polling, no timeouts)
-    while (capture_running_.load() && !owner_->get_node_base_interface()->get_context()->is_shutdown()) {
+    while (capture_running_.load() && rclcpp::ok(owner_->get_node_base_interface()->get_context())) {
         struct v4l2_buffer v4l2_buf;
         struct v4l2_plane planes[MAX_PLANES];
         NvBuffer* buffer = nullptr;
@@ -725,7 +805,7 @@ void MmapiDecodedOptimizedStreamDelegate::captureLoop()
         std::memset(planes, 0, sizeof(planes));
         v4l2_buf.m.planes = planes;
         v4l2_buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
-        v4l2_buf.memory = V4L2_MEMORY_DMABUF;  // PHASE 2: DMABUF
+        v4l2_buf.memory = capture_memory_type_;
 
         // ===== BLOCKING DEQUEUE: -1 = WAIT FOREVER FOR NEXT DECODED FRAME =====
         // This blocks until decoder fills buffer with decoded frame (no polling overhead!)
@@ -769,6 +849,18 @@ void MmapiDecodedOptimizedStreamDelegate::cleanupDecoder()
     // ===== SIGNAL CAPTURE THREAD TO STOP =====
     decoder_ready_ = false;
     capture_running_.store(false);
+
+    // Unblock blocking dqBuffer(-1) by disabling active planes before join.
+    if (decoder_) {
+        if (capture_setup_done_.load()) {
+            if (decoder_->capture_plane.setStreamStatus(false) < 0) {
+                RCLCPP_WARN(owner_->get_logger(), "Failed to stop capture plane stream during shutdown");
+            }
+        }
+        if (decoder_->output_plane.setStreamStatus(false) < 0) {
+            RCLCPP_WARN(owner_->get_logger(), "Failed to stop output plane stream during shutdown");
+        }
+    }
 
     // ===== JOIN CAPTURE THREAD =====
     if (capture_thread_.joinable()) {

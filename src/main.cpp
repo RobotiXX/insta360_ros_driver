@@ -1,4 +1,5 @@
 #include <iostream>
+#include <chrono>
 #include <thread>
 #include <string>
 #include <vector>
@@ -90,18 +91,37 @@ public:
 class CameraWrapper {
 private:
     std::shared_ptr<ins_camera::Camera> cam;
+    std::shared_ptr<ins_camera::StreamDelegate> stream_delegate_;
     std::shared_ptr<rclcpp::Node> node_;
+    bool live_streaming_started_ = false;
 
 public:
     CameraWrapper(const std::shared_ptr<rclcpp::Node>& node) : node_(node) {}
 
     ~CameraWrapper() {
-        if (cam) {
-            cam->Close();
+        stop_camera();
+    }
+
+    void stop_camera() {
+        if (!cam) {
+            return;
         }
+
+        if (live_streaming_started_) {
+            if (!cam->StopLiveStreaming()) {
+                RCLCPP_WARN(node_->get_logger(), "StopLiveStreaming failed during shutdown.");
+            }
+            live_streaming_started_ = false;
+        }
+
+        cam->Close();
+        cam.reset();
+        stream_delegate_.reset();
     }
 
     int run_camera() {
+        stop_camera();
+
         ins_camera::DeviceDiscovery discovery;
         auto list = discovery.GetAvailableDevices();
         if (list.empty()) {
@@ -112,13 +132,15 @@ public:
         cam = std::make_shared<ins_camera::Camera>(list[0].info);
         if (!cam->Open()) {
             RCLCPP_ERROR(node_->get_logger(), "Failed to open camera.");
+            discovery.FreeDeviceDescriptors(list);
+            cam.reset();
             return -1;
         }
         RCLCPP_INFO(node_->get_logger(), "Camera opened successfully.");
         discovery.FreeDeviceDescriptors(list);
 
-        std::shared_ptr<ins_camera::StreamDelegate> delegate = std::make_shared<TestStreamDelegate>(node_);
-        cam->SetStreamDelegate(delegate);
+        stream_delegate_ = std::make_shared<TestStreamDelegate>(node_);
+        cam->SetStreamDelegate(stream_delegate_);
 
         auto start = time(NULL);
 
@@ -133,17 +155,40 @@ public:
         //RES_1152_1152P30 (this will give 2304 x 1152 at 30 FPS)
         //RES_1920_960P30  
         param.lrv_video_resulution = ins_camera::VideoResolution::RES_1440_720P30;
-        param.video_bitrate = 1024 * 1024 / 2;
+        param.video_bitrate = 1024 * 1024 * 2;
         param.enable_audio = false;
         param.using_lrv = false;
 
         if (!cam->StartLiveStreaming(param)) {
             RCLCPP_ERROR(node_->get_logger(), "Failed to start live streaming.");
+            stop_camera();
             return -1;
         }
-        
+
+        live_streaming_started_ = true;
         RCLCPP_INFO(node_->get_logger(), "Live streaming started.");
         return 0;
+    }
+
+    int run_camera_with_retry() {
+        constexpr auto retry_delay = std::chrono::seconds(2);
+        int attempt = 1;
+
+        while (rclcpp::ok()) {
+            if (run_camera() == 0) {
+                return 0;
+            }
+
+            RCLCPP_WARN(
+                node_->get_logger(),
+                "Camera initialization attempt %d failed. Retrying in %.1f seconds.",
+                attempt,
+                std::chrono::duration<double>(retry_delay).count());
+            ++attempt;
+            rclcpp::sleep_for(retry_delay);
+        }
+
+        return -1;
     }
 };
 
@@ -152,7 +197,7 @@ int main(int argc, char* argv[]) {
     auto node = rclcpp::Node::make_shared("insta_publisher");
     
     CameraWrapper camera(node);
-    if (camera.run_camera() != 0) {
+    if (camera.run_camera_with_retry() != 0) {
         rclcpp::shutdown();
         return -1;
     }

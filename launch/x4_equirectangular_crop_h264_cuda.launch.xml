@@ -6,15 +6,17 @@
     <arg name="skip_frame" default="1"/>
     <arg name="i_frame_only" default="false"/>
     <arg name="crop_out_height" default="640"/>
+    <arg name="gpu" default="true"/>
 
     <node pkg="insta360_ros_driver" exec="insta360_ros_driver" name="insta_publisher" output="screen"/>
 
-    <node pkg="insta360_ros_driver" exec="equirectangular_crop_h264" name="equirectangular_node" output="screen">
+    <node pkg="insta360_ros_driver" exec="equirectangular_crop_h264_cuda" name="equirectangular_node" output="screen">
+        <param from="$(var equirectangular_config)"/>
         <param name="compressed_topic" value="$(var compressed_topic)"/>
         <param name="output_topic" value="$(var output_topic)"/>
         <param name="skip_frame" value="$(var skip_frame)"/>
         <param name="i_frame_only" value="$(var i_frame_only)"/>
         <param name="crop_out_height" value="$(var crop_out_height)"/>
-        <param from="$(var equirectangular_config)"/>
+        <param name="gpu" value="$(var gpu)"/>
     </node>
 </launch>

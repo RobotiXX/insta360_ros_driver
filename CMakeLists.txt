@@ -133,6 +133,29 @@ install(TARGETS equirectangular_crop_h264
   DESTINATION lib/${PROJECT_NAME}
 )
 
+add_executable(equirectangular_crop_h264_cuda src/equirectangular_crop_h264_cuda.cpp)
+ament_target_dependencies(equirectangular_crop_h264_cuda
+  rclcpp
+  sensor_msgs
+  OpenCV
+)
+target_link_libraries(equirectangular_crop_h264_cuda ${OpenCV_LIBRARIES} ${AVCODEC_LIBRARIES} ${AVFORMAT_LIBRARIES} ${AVUTIL_LIBRARIES} ${SWSCALE_LIBRARIES})
+
+install(TARGETS equirectangular_crop_h264_cuda
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+add_executable(opencv_cuda_check src/opencv_cuda_check.cpp)
+ament_target_dependencies(opencv_cuda_check
+  rclcpp
+  OpenCV
+)
+target_link_libraries(opencv_cuda_check ${OpenCV_LIBRARIES})
+
+install(TARGETS opencv_cuda_check
+  DESTINATION lib/${PROJECT_NAME}
+)
+
 ament_python_install_package(${PROJECT_NAME})
 install(PROGRAMS
   scripts/equirectangular.py

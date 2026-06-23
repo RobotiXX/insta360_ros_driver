@@ -27,12 +27,12 @@ class EquirectangularNode(Node):
                 ('cx_offset', 0.0),
                 ('cy_offset', 0.0),
                 ('front_cx_offset', 0.0),
-                ('front_cy_offset', 0.0),
+                ('front_cy_offset', -3.0),
                 ('back_cx_offset', 0.0),
-                ('back_cy_offset', 0.0),
-                ('crop_size', 960),
-                ('translation', [0.0, 0.0, -0.105]),
-                ('rotation_deg', [-0.5, 0.0, 1.1]),
+                ('back_cy_offset', 4.0),
+                ('crop_size', 1377),
+                ('translation', [0.005, 0.0, -0.05]),
+                ('rotation_deg', [0.0, 0.7, -0.5]),
                 ('gpu', True),
                 ('out_width', 1920),
                 ('out_height', 960)
@@ -87,7 +87,7 @@ class EquirectangularNode(Node):
         # Configure QoS for reliable communication with buffer size 1
         qos = rclpy.qos.QoSProfile(
             depth=1,
-            reliability=rclpy.qos.ReliabilityPolicy.RELIABLE
+            reliability=rclpy.qos.ReliabilityPolicy.BEST_EFFORT
         )
         
         self.dual_fisheye_sub = self.create_subscription(
@@ -699,10 +699,10 @@ class EquirectangularNode(Node):
         vertical_fractions = [1.0 / 8.0, 3.0 / 8.0, 0.5, 5.0 / 8.0, 7.0 / 8.0]
         for frac in vertical_fractions:
             x = min(max(int(round(w * frac)), 0), w - 1)
-            cv2.line(equirect_bgr, (x, 0), (x, h - 1), (0, 255, 0), 1, cv2.LINE_AA)
+            cv2.line(equirect_bgr, (x, 0), (x, h - 1), (0, 255, 0), 1, cv2.LINE_4)
 
         y_mid = min(max(int(round(h * 0.5)), 0), h - 1)
-        cv2.line(equirect_bgr, (0, y_mid), (w - 1, y_mid), (0, 255, 0), 1, cv2.LINE_AA)
+        cv2.line(equirect_bgr, (0, y_mid), (w - 1, y_mid), (0, 255, 0), 1, cv2.LINE_4)
         
         # Add instructions
         if equirect_bgr is not None:

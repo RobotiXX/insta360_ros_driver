@@ -54,6 +54,7 @@ public:
         declare_parameter("out_width", 1920);
         declare_parameter("out_height", 960);
         declare_parameter("crop_out_height", 640);
+        declare_parameter("enable_seam_blending", false);
 
         compressed_topic_ = get_parameter("compressed_topic").as_string();
         output_topic_ = get_parameter("output_topic").as_string();
@@ -94,6 +95,7 @@ private:
         out_height_ = get_parameter("out_height").as_int();
         crop_out_height_ = get_parameter("crop_out_height").as_int();
         gpu_enabled_ = get_parameter("gpu").as_bool();
+        enable_seam_blending_ = get_parameter("enable_seam_blending").as_bool();
 
         auto translation = get_parameter("translation").as_double_array();
         tx_ = translation[0];
@@ -226,6 +228,19 @@ private:
             }
         }
 
+        cv::Mat front_mask_uint8;
+        front_mask_.convertTo(front_mask_uint8, CV_8U, 255);
+
+        blend_kernel_ = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(5, 5));
+        cv::Mat dilated, eroded;
+        cv::dilate(front_mask_uint8, dilated, blend_kernel_, cv::Point(-1, -1), 2);
+        cv::erode(front_mask_uint8, eroded, blend_kernel_, cv::Point(-1, -1), 2);
+        front_edge_ = dilated - eroded;
+
+        cv::distanceTransform(front_mask_uint8, front_distance_, cv::DIST_L2, cv::DIST_MASK_5);
+        front_distance_ *= 0.3f;
+        cv::min(front_distance_, 1.0f, front_distance_);
+
         maps_initialized_ = true;
     }
 
@@ -268,11 +283,40 @@ private:
         const auto remap_start = std::chrono::steady_clock::now();
         cv::Mat front_result;
         cv::Mat back_result;
-        cv::remap(front_img, front_result, front_map_x_, front_map_y_, cv::INTER_CUBIC, cv::BORDER_CONSTANT, cv::Scalar(0, 0, 0));
-        cv::remap(back_img, back_result, back_map_x_, back_map_y_, cv::INTER_CUBIC, cv::BORDER_CONSTANT, cv::Scalar(0, 0, 0));
+        cv::remap(front_img, front_result, front_map_x_, front_map_y_, cv::INTER_LINEAR, cv::BORDER_REPLICATE, cv::Scalar(0, 0, 0));
+        cv::remap(back_img, back_result, back_map_x_, back_map_y_, cv::INTER_LINEAR, cv::BORDER_REPLICATE, cv::Scalar(0, 0, 0));
         cv::Mat equirect = cv::Mat::zeros(crop_out_height_, out_width_, CV_8UC3);
-        front_result.copyTo(equirect, front_mask_);
-        back_result.copyTo(equirect, back_mask_);
+
+        if (enable_seam_blending_) {
+            for (int y = 0; y < crop_out_height_; ++y) {
+                for (int x = 0; x < out_width_; ++x) {
+                    const uchar edge_val = front_edge_.at<uchar>(y, x);
+
+                    if (edge_val == 0) {
+                        if (front_mask_.at<uchar>(y, x)) {
+                            equirect.at<cv::Vec3b>(y, x) = front_result.at<cv::Vec3b>(y, x);
+                        } else {
+                            equirect.at<cv::Vec3b>(y, x) = back_result.at<cv::Vec3b>(y, x);
+                        }
+                    } else {
+                        const float alpha = front_distance_.at<float>(y, x);
+                        const cv::Vec3f f = cv::Vec3f(front_result.at<cv::Vec3b>(y, x));
+                        const cv::Vec3f b = cv::Vec3f(back_result.at<cv::Vec3b>(y, x));
+                        const cv::Vec3f blended = alpha * f + (1.0f - alpha) * b;
+
+                        equirect.at<cv::Vec3b>(y, x) = cv::Vec3b(
+                            cv::saturate_cast<uchar>(blended[0]),
+                            cv::saturate_cast<uchar>(blended[1]),
+                            cv::saturate_cast<uchar>(blended[2])
+                        );
+                    }
+                }
+            }
+        } else {
+            front_result.copyTo(equirect, front_mask_);
+            back_result.copyTo(equirect, back_mask_);
+        }
+
         remap_time_us_acc_ += static_cast<uint64_t>(
             std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - remap_start).count());
         return equirect;
@@ -613,12 +657,16 @@ private:
     int out_width_;
     int out_height_;
     int crop_out_height_;
+    bool enable_seam_blending_ = false;
 
     cv::Mat back_to_front_rotation_;
     cv::Vec3d back_to_front_translation_;
     cv::Mat front_map_x_, front_map_y_;
     cv::Mat back_map_x_, back_map_y_;
     cv::Mat front_mask_, back_mask_;
+    cv::Mat front_edge_;
+    cv::Mat front_distance_;
+    cv::Mat blend_kernel_;
     bool maps_initialized_ = false;
     int img_height_ = 0;
     int img_width_ = 0;

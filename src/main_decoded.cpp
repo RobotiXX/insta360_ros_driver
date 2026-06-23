@@ -50,9 +50,11 @@ public:
                     i_frame_only_(i_frame_only),
                     publish_nv12_(publish_nv12)
     {
+        auto qos = rclcpp::SensorDataQoS().best_effort().keep_last(2);
+        // qos.keep_last(1);
         image_pub_ = node_->create_publisher<sensor_msgs::msg::Image>(
             "/dual_fisheye/image",
-            rclcpp::SensorDataQoS());
+            qos);
 
         init_decoder();
         RCLCPP_INFO(
@@ -319,6 +321,14 @@ private:
             }
 
             if (converted && !bgr_frame_.empty()) {
+                // cross hair for debug
+                // const int width = bgr_frame_.cols;
+                // const int height = bgr_frame_.rows;
+                // cv::Scalar red(0, 0, 255);
+                // cv::line(bgr_frame_, cv::Point(0, height / 2), cv::Point(width, height / 2), red, 2, cv::LINE_4);
+                // cv::line(bgr_frame_, cv::Point(width / 4, 0), cv::Point(width / 4, height), red, 2, cv::LINE_4);
+                // cv::line(bgr_frame_, cv::Point(3 * width / 4, 0), cv::Point(3 * width / 4, height), red, 2, cv::LINE_4);
+
                 auto t0 = std::chrono::steady_clock::now();
                 std_msgs::msg::Header header;
                 header.stamp = node_->get_clock()->now();
@@ -552,6 +562,7 @@ private:
 
         auto start = time(NULL);
         uint64_t utc_time = static_cast<uint64_t>(start);
+        // cam_->SyncLocalTimeToCamera(utc_time, 0); // for working on AMD64 architecture
         cam_->SyncLocalTimeToCamera(utc_time);
 
         ins_camera::LiveStreamParam param;

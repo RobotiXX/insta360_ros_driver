@@ -3,6 +3,7 @@
     <arg name="equirectangular_config" default="$(find-pkg-share insta360_ros_driver)/config/x4_calibration.yaml"/>
     <arg name="compressed_topic" default="/dual_fisheye/image/compressed"/>
     <arg name="output_topic" default="/equirectangular/image"/>
+    <arg name="camera_info_topic" default="/equirectangular/image/camera_info"/>
     <arg name="skip_frame" default="1"/>
     <arg name="i_frame_only" default="false"/>
     <arg name="crop_out_height" default="640"/>
@@ -12,6 +13,7 @@
     <node pkg="insta360_ros_driver" exec="equirectangular_crop_h264" name="equirectangular_node" output="screen">
         <param name="compressed_topic" value="$(var compressed_topic)"/>
         <param name="output_topic" value="$(var output_topic)"/>
+        <param name="camera_info_topic" value="$(var camera_info_topic)"/>
         <param name="skip_frame" value="$(var skip_frame)"/>
         <param name="i_frame_only" value="$(var i_frame_only)"/>
         <param name="crop_out_height" value="$(var crop_out_height)"/>

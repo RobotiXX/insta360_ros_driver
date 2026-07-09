@@ -10,6 +10,7 @@
 #include <opencv2/opencv.hpp>
 
 #include "rclcpp/rclcpp.hpp"
+#include "sensor_msgs/msg/camera_info.hpp"
 #include "sensor_msgs/msg/compressed_image.hpp"
 #include "sensor_msgs/msg/image.hpp"
 
@@ -39,6 +40,7 @@ public:
     {
         declare_parameter("compressed_topic", "/dual_fisheye/image/compressed");
         declare_parameter("output_topic", "/equirectangular/image");
+        declare_parameter("camera_info_topic", "/equirectangular/image/camera_info");
         declare_parameter("skip_frame", 0);
         declare_parameter("i_frame_only", false);
         declare_parameter("cx_offset", 0.0);
@@ -58,6 +60,7 @@ public:
 
         compressed_topic_ = get_parameter("compressed_topic").as_string();
         output_topic_ = get_parameter("output_topic").as_string();
+        camera_info_topic_ = get_parameter("camera_info_topic").as_string();
         skip_frame_ = get_parameter("skip_frame").as_int();
         i_frame_only_ = get_parameter("i_frame_only").as_bool();
 
@@ -70,10 +73,12 @@ public:
             rclcpp::SensorDataQoS(),
             std::bind(&EquirectangularCropH264Node::compressed_callback, this, std::placeholders::_1));
         equirect_pub_ = create_publisher<sensor_msgs::msg::Image>(output_topic_, rclcpp::SensorDataQoS());
+        camera_info_pub_ = create_publisher<sensor_msgs::msg::CameraInfo>(camera_info_topic_, rclcpp::SensorDataQoS());
 
         RCLCPP_INFO(get_logger(), "Compressed-input cropped equirect node ready");
         RCLCPP_INFO(get_logger(), "  Subscribing to: %s", compressed_topic_.c_str());
         RCLCPP_INFO(get_logger(), "  Publishing to: %s", output_topic_.c_str());
+        RCLCPP_INFO(get_logger(), "  Publishing camera info to: %s", camera_info_topic_.c_str());
     }
 
     ~EquirectangularCropH264Node() override
@@ -462,9 +467,19 @@ private:
         const size_t size = static_cast<size_t>(equirect.rows) * equirect.step[0];
         msg->data.assign(equirect.data, equirect.data + size);
         equirect_pub_->publish(std::move(msg));
+        publish_camera_info(header, equirect.rows, equirect.cols);
         publish_time_us_acc_ += static_cast<uint64_t>(
             std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - publish_start).count());
         ++published_frame_counter_;
+    }
+
+    void publish_camera_info(const std_msgs::msg::Header& header, int height, int width)
+    {
+        auto msg = std::make_unique<sensor_msgs::msg::CameraInfo>();
+        msg->header = header;
+        msg->height = static_cast<uint32_t>(height);
+        msg->width = static_cast<uint32_t>(width);
+        camera_info_pub_->publish(std::move(msg));
     }
 
     void handle_decoded_frame(AVFrame* frame, const std_msgs::msg::Header& header)
@@ -625,8 +640,10 @@ private:
 
     std::string compressed_topic_;
     std::string output_topic_;
+    std::string camera_info_topic_;
     rclcpp::Subscription<sensor_msgs::msg::CompressedImage>::SharedPtr compressed_sub_;
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr equirect_pub_;
+    rclcpp::Publisher<sensor_msgs::msg::CameraInfo>::SharedPtr camera_info_pub_;
 
     AVCodec* codec_ = nullptr;
     AVCodecContext* codec_ctx_ = nullptr;
